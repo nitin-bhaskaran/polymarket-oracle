@@ -1,0 +1,24 @@
+[Unit]
+Description=Polymarket Oracle Trading Bot
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nitin
+WorkingDirectory=/home/nitin/polymarket-oracle
+ExecStart=/home/nitin/polymarket-oracle/venv/bin/python -m core.main
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+# Safety limits
+MemoryMax=512M
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target

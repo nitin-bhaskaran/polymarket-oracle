@@ -1,0 +1,97 @@
+# Polymarket Oracle Configuration
+# Copy this to config.yaml and fill in your credentials
+# NEVER commit config.yaml to git
+
+polymarket:
+  # Your Polygon wallet private key (without 0x prefix)
+  # Generate one or export from MetaMask
+  private_key: "YOUR_PRIVATE_KEY_HERE"
+  
+  # Your Polymarket proxy wallet address
+  # Find this in Polymarket UI -> Profile dropdown
+  funder_address: "0xYOUR_FUNDER_ADDRESS_HERE"
+  
+  # Signature type: 0=EOA, 1=Magic/email wallet, 2=Gnosis Safe
+  signature_type: 1
+  
+  # API endpoints (don't change unless Polymarket migrates)
+  clob_url: "https://clob.polymarket.com"
+  gamma_url: "https://gamma-api.polymarket.com"
+  chain_id: 137
+
+anthropic:
+  # Your Anthropic API key for probability assessment
+  api_key: "YOUR_ANTHROPIC_API_KEY_HERE"
+  
+  # Model to use for probability assessment
+  model: "claude-sonnet-4-20250514"
+  
+  # Max tokens per assessment call
+  max_tokens: 1024
+
+telegram:
+  # Bot token from @BotFather
+  bot_token: "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+  
+  # Your Telegram user ID (get from @userinfobot)
+  chat_id: "YOUR_CHAT_ID_HERE"
+  
+  # Send alerts for these events
+  alert_on:
+    - trade_executed
+    - edge_detected
+    - position_closed
+    - daily_pnl
+    - error
+
+risk:
+  # Starting capital in USDC
+  starting_capital: 130.0  # ~100 GBP
+  
+  # Maximum % of capital per single position
+  max_position_pct: 10.0
+  
+  # Maximum number of concurrent open positions
+  max_positions: 10
+  
+  # Minimum edge (%) to trigger a trade
+  # Edge = |AI_probability - market_price| 
+  min_edge: 5.0
+  
+  # Stop loss per position (% of position value)
+  stop_loss_pct: 50.0
+  
+  # Daily loss limit (% of capital)
+  daily_loss_limit_pct: 15.0
+  
+  # Circuit breaker: pause trading after N consecutive losses
+  consecutive_loss_limit: 5
+  
+  # Don't trade markets expiring within this many hours
+  min_hours_to_expiry: 2
+  
+  # Minimum market liquidity in USDC to consider
+  min_liquidity: 5000.0
+  
+  # Minimum 24h volume to consider
+  min_volume_24h: 1000.0
+
+scanner:
+  # How often to scan for opportunities (seconds)
+  scan_interval: 300  # 5 minutes
+  
+  # Maximum markets to assess per scan cycle
+  max_markets_per_scan: 20
+  
+  # Market categories to include (empty = all)
+  # Options: politics, crypto, sports, entertainment, science, business, world
+  include_categories: []
+  
+  # Market categories to exclude
+  exclude_categories: []
+
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  file: "logs/oracle.log"
+  max_size_mb: 50
+  backup_count: 5
