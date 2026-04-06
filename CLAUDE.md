@@ -65,3 +65,4 @@ polymarket-oracle/
 - `python -m core.main --dry-run` — Run without executing trades
 - `python -m tests.test_scanner` — Test market scanner
 - `python -m core.market_scanner --list` — List current markets
+# Review requested
