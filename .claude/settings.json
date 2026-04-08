@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "scripts/sec.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Read:*",
+      "Bash:git *",
+      "Bash:python *",
+      "Bash:pip *",
+      "Bash:pytest *"
+    ],
+    "deny": [
+      "Read:config/config.yaml",
+      "Bash:curl *",
+      "Bash:sudo *"
+    ]
+  }
+}
