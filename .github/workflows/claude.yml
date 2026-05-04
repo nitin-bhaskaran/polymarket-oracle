@@ -22,10 +22,11 @@ jobs:
       issues: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4          # NEW - fixes the git fetch error
         with:
-          fetch-depth: 0
+          fetch-depth: 0                   # NEW - full git history
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           trigger_phrase: "@claude"
+          claude_args: "--model claude-sonnet-4-6"   # NEW - cost optimisation
