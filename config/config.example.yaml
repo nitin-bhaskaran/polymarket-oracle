@@ -26,19 +26,28 @@ polymarket:
   chain_id: 137
   tick_size: "0.01"
   order_type: "FOK"
+  reconcile_fills: true
 
 anthropic:
   # Your Anthropic API key for probability assessment
   api_key: "YOUR_ANTHROPIC_API_KEY_HERE"
 
   # Model to use for probability assessment
-  model: "claude-sonnet-4-20250514"
+  model: "claude-sonnet-4-6"
 
   # Max tokens per assessment call
   max_tokens: 1024
 
   # Keep false to reduce anchoring when asking for independent probabilities.
   include_market_price_in_prompt: false
+
+news:
+  # Uses GDELT's public document API by default; no API key required.
+  enabled: true
+  provider: "gdelt"
+  max_articles: 5
+  timeout_seconds: 10
+  language: "english"
 
 telegram:
   # Bot token from @BotFather

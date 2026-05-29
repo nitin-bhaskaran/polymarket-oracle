@@ -17,6 +17,7 @@ try:
         OrderType,
         PartialCreateOrderOptions,
         Side as ClobSide,
+        TradeParams,
     )
 except ImportError:  # Allows dry-run tests without CLOB dependencies installed.
     ApiCreds = None
@@ -26,10 +27,12 @@ except ImportError:  # Allows dry-run tests without CLOB dependencies installed.
     OrderType = None
     PartialCreateOrderOptions = None
     ClobSide = None
+    TradeParams = None
 
 from core.models import (
     Market, Outcome, Position, ProbabilityAssessment, Side as TradeSide, Trade
 )
+from core.money import dec, price as quantized_price, shares, usdc
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,7 @@ class Trader:
         self.clob_api_passphrase = poly_config.get("clob_api_passphrase", "")
         self.tick_size = poly_config.get("tick_size", "0.01")
         self.order_type = poly_config.get("order_type", "FOK")
+        self.reconcile_fills = poly_config.get("reconcile_fills", True)
 
         # Risk parameters
         self.max_position_pct = risk_config.get("max_position_pct", 10.0) / 100
@@ -172,11 +176,14 @@ class Trader:
             return None
 
         # Calculate position size
-        max_spend = min(available_capital * self.max_position_pct, available_capital)
+        max_spend = usdc(min(
+            dec(available_capital) * dec(self.max_position_pct),
+            dec(available_capital),
+        ))
         # Size = how many shares we can buy at current price
         # Each share pays $1 if correct, costs $price
-        size = max_spend / price if price > 0 else 0
-        total_cost = size * price
+        size = shares(dec(max_spend) / dec(price)) if price > 0 else 0
+        total_cost = usdc(dec(size) * dec(price))
 
         if total_cost > available_capital:
             logger.warning(
@@ -232,11 +239,18 @@ class Trader:
                 reference_price=price,
             )
 
-            fill_price = self._extract_fill_price(response)
-            if fill_price:
-                trade.price = fill_price
-                trade.size = total_cost / fill_price
-                trade.total_cost = total_cost
+            fill = self._reconcile_fill(
+                response=response,
+                token_id=token_id,
+                side=TradeSide.BUY,
+                fallback_price=price,
+                fallback_size=size,
+                fallback_total=total_cost,
+            )
+            if fill:
+                trade.price = fill["price"]
+                trade.size = fill["size"]
+                trade.total_cost = fill["total"]
 
             trade.order_id = self._extract_order_id(response)
             trade.success = True
@@ -256,8 +270,8 @@ class Trader:
         The portfolio should only mark the position closed after this method
         returns a successful trade.
         """
-        price = position.current_price or position.entry_price
-        proceeds = position.size * price
+        price = quantized_price(position.current_price or position.entry_price)
+        proceeds = usdc(dec(position.size) * dec(price))
         trade = Trade(
             market_condition_id=position.market_condition_id,
             token_id=position.token_id,
@@ -266,7 +280,7 @@ class Trader:
             price=price,
             size=position.size,
             total_cost=proceeds,
-            realized_pnl=proceeds - position.cost_basis,
+            realized_pnl=usdc(dec(proceeds) - dec(position.cost_basis)),
             market_price_at_trade=price,
         )
 
@@ -293,11 +307,19 @@ class Trader:
                 side=TradeSide.SELL,
                 reference_price=price,
             )
-            fill_price = self._extract_fill_price(response)
-            if fill_price:
-                trade.price = fill_price
-                trade.total_cost = position.size * fill_price
-                trade.realized_pnl = trade.total_cost - position.cost_basis
+            fill = self._reconcile_fill(
+                response=response,
+                token_id=position.token_id,
+                side=TradeSide.SELL,
+                fallback_price=price,
+                fallback_size=position.size,
+                fallback_total=proceeds,
+            )
+            if fill:
+                trade.price = fill["price"]
+                trade.size = fill["size"]
+                trade.total_cost = fill["total"]
+                trade.realized_pnl = usdc(dec(trade.total_cost) - dec(position.cost_basis))
             trade.order_id = self._extract_order_id(response)
             trade.success = True
         except Exception as e:
@@ -376,8 +398,86 @@ class Trader:
     def _price_limit(self, reference_price: float, side: TradeSide) -> float:
         slippage = self.slippage_bps / 10_000
         if side == TradeSide.BUY:
-            return min(0.99, reference_price * (1 + slippage))
-        return max(0.01, reference_price * (1 - slippage))
+            return quantized_price(min(dec("0.99"), dec(reference_price) * (dec(1) + dec(slippage))))
+        return quantized_price(max(dec("0.01"), dec(reference_price) * (dec(1) - dec(slippage))))
+
+    def _reconcile_fill(
+        self,
+        response: dict,
+        token_id: str,
+        side: TradeSide,
+        fallback_price: float,
+        fallback_size: float,
+        fallback_total: float,
+    ) -> Optional[dict[str, float]]:
+        """
+        Reconcile fill details from the post response, order detail, or recent trades.
+
+        CLOB response shapes can vary between order status and trade data. We parse
+        all available candidates and fall back to the conservative local estimate
+        when no fill detail is present.
+        """
+        candidates = [response]
+        order_id = self._extract_order_id(response)
+
+        if self.reconcile_fills and self.client and order_id:
+            try:
+                order = self.client.get_order(order_id)
+                if order:
+                    candidates.append(order)
+            except Exception as e:
+                logger.warning(f"Failed to fetch order details for {order_id}: {e}")
+
+            try:
+                trade = self._find_recent_order_trade(order_id, token_id)
+                if trade:
+                    candidates.append(trade)
+            except Exception as e:
+                logger.warning(f"Failed to fetch trade details for {order_id}: {e}")
+
+        for candidate in candidates:
+            fill = self._extract_fill_details(
+                candidate,
+                side=side,
+                fallback_price=fallback_price,
+                fallback_size=fallback_size,
+                fallback_total=fallback_total,
+            )
+            if fill:
+                return fill
+
+        return {
+            "price": quantized_price(fallback_price),
+            "size": shares(fallback_size),
+            "total": usdc(fallback_total),
+        }
+
+    def _find_recent_order_trade(self, order_id: str, token_id: str) -> Optional[dict]:
+        if not self.client or TradeParams is None or not hasattr(self.client, "get_trades"):
+            return None
+
+        trades = self.client.get_trades(
+            TradeParams(asset_id=token_id),
+            only_first_page=True,
+        ) or []
+
+        for trade in trades:
+            identifiers = {
+                str(trade.get(key, ""))
+                for key in (
+                    "order_id",
+                    "orderId",
+                    "orderID",
+                    "maker_order_id",
+                    "makerOrderId",
+                    "taker_order_id",
+                    "takerOrderId",
+                )
+                if isinstance(trade, dict)
+            }
+            if order_id in identifiers:
+                return trade
+        return None
 
     @staticmethod
     def _extract_order_id(response: dict) -> str:
@@ -392,12 +492,81 @@ class Trader:
         )
 
     @staticmethod
-    def _extract_fill_price(response: dict) -> Optional[float]:
+    def _extract_fill_details(
+        response: dict,
+        side: TradeSide,
+        fallback_price: float,
+        fallback_size: float,
+        fallback_total: float,
+    ) -> Optional[dict[str, float]]:
         if not isinstance(response, dict):
             return None
-        for key in ("avgPrice", "average_price", "price", "filled_price"):
+
+        price_value = Trader._first_numeric(
+            response,
+            "avgPrice",
+            "average_price",
+            "averagePrice",
+            "filled_price",
+            "filledPrice",
+            "price",
+        )
+        size_value = Trader._first_numeric(
+            response,
+            "size_matched",
+            "sizeMatched",
+            "matched_size",
+            "matchedSize",
+            "filled_size",
+            "filledSize",
+            "size",
+            "shares",
+        )
+        total_value = Trader._first_numeric(
+            response,
+            "total",
+            "total_cost",
+            "totalCost",
+            "filled_amount",
+            "filledAmount",
+            "value",
+            "cost",
+            "proceeds",
+        )
+
+        if price_value is None and size_value is None and total_value is None:
+            return None
+
+        price_value = dec(price_value if price_value is not None else fallback_price)
+
+        if size_value is None and total_value is not None and price_value > 0:
+            size_value = dec(total_value) / price_value
+        elif size_value is None:
+            size_value = dec(fallback_size)
+        else:
+            size_value = dec(size_value)
+
+        if total_value is None:
+            total_value = size_value * price_value
+        else:
+            total_value = dec(total_value)
+
+        # BUY market order responses may report the requested USDC amount
+        # separately from matched shares; keep the actual spend when known.
+        if side == TradeSide.BUY and total_value == 0:
+            total_value = dec(fallback_total)
+
+        return {
+            "price": quantized_price(price_value),
+            "size": shares(size_value),
+            "total": usdc(total_value),
+        }
+
+    @staticmethod
+    def _first_numeric(response: dict, *keys: str) -> Optional[float]:
+        for key in keys:
             value = response.get(key)
-            if value is None:
+            if value is None or value == "":
                 continue
             try:
                 return float(value)

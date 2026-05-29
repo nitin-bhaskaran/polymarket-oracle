@@ -297,15 +297,20 @@ if __name__ == "__main__":
     scanner = MarketScanner(config)
     markets = scanner.scan()
     
-    print(f"\n{'='*80}")
-    print(f"Found {len(markets)} tradeable markets")
-    print(f"{'='*80}\n")
-    
+    logger.info("%s", "=" * 80)
+    logger.info("Found %s tradeable markets", len(markets))
+    logger.info("%s", "=" * 80)
+
     for i, m in enumerate(markets, 1):
-        print(f"{i:3d}. [{m.yes_price:.0%}] {m.question}")
-        print(f"     Event: {m.event_title}")
-        print(f"     Liquidity: ${m.liquidity:,.0f} | 24h Vol: ${m.volume_24h:,.0f}")
-        print(f"     Expires: {m.end_date or 'N/A'}")
-        print()
+        logger.info(
+            "%3d. [%s] %s | Event: %s | Liquidity: $%.0f | 24h Vol: $%.0f | Expires: %s",
+            i,
+            f"{m.yes_price:.0%}",
+            m.question,
+            m.event_title,
+            m.liquidity,
+            m.volume_24h,
+            m.end_date or "N/A",
+        )
     
     scanner.close()

@@ -92,6 +92,7 @@ Key settings:
 - `polymarket.funder_address`: Your Polymarket proxy wallet address
 - `polymarket.clob_api_*`: Optional pre-created CLOB V2 API credentials
 - `anthropic.api_key`: For AI probability assessment
+- `news.enabled`: Whether to enrich assessments with public news context
 - `telegram.bot_token`: For trade alerts
 - `telegram.chat_id`: Your Telegram user ID
 - `risk.max_position_pct`: Max % of capital per trade (default: 10%)
@@ -103,7 +104,7 @@ The bot runs a **news-driven probability repricing** strategy:
 
 1. **Scan** — Fetches all active markets from Polymarket Gamma API
 2. **Filter** — Selects markets with sufficient liquidity and volume
-3. **Assess** — For each candidate, uses Claude to estimate true probability
+3. **Assess** — For each candidate, fetches recent public news and uses Claude to estimate true probability
 4. **Compare** — Calculates edge: `|AI_probability - market_price|`
 5. **Trade** — If edge exceeds threshold, places a trade via CLOB API
 6. **Monitor** — Tracks positions, P&L, and market movements
@@ -123,8 +124,8 @@ The bot runs a **news-driven probability repricing** strategy:
 This repo is in dry-run/paper-trading hardening. Live trading should wait until:
 
 - CLOB V2 order placement has been tested with a small funded wallet
-- Stop-loss sell paths and actual fills are reconciled against Polymarket
-- Probability assessments include fresh news/context rather than only the market question
+- Stop-loss sell paths and actual fills are reconciled against Polymarket in a live paper run
+- Probability assessments have enough fresh news/context for the target market categories
 - The test suite passes locally and on CI
 
 ## License

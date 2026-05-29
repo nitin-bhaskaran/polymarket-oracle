@@ -14,6 +14,7 @@ from typing import Optional
 from core.models import (
     Market, Outcome, Position, PortfolioSnapshot, Side, Trade
 )
+from core.money import dec, usdc
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,13 @@ class PortfolioManager:
             logger.warning(f"Recording failed trade: {trade.error_message}")
             return None
 
+        if dec(trade.total_cost) > dec(self.available_capital):
+            logger.error(
+                f"Rejecting trade that exceeds available capital: "
+                f"${trade.total_cost:.2f} > ${self.available_capital:.2f}"
+            )
+            return None
+
         # Create new position
         position = Position(
             market_condition_id=trade.market_condition_id,
@@ -109,7 +117,7 @@ class PortfolioManager:
         )
 
         # Update capital
-        self.available_capital -= trade.total_cost
+        self.available_capital = usdc(dec(self.available_capital) - dec(trade.total_cost))
         self.open_positions.append(position)
 
         logger.info(
@@ -156,8 +164,10 @@ class PortfolioManager:
         position.current_price = close_price
 
         # Update P&L tracking
-        self.daily_pnl += realized_pnl
-        self.available_capital += position.cost_basis + realized_pnl
+        self.daily_pnl = usdc(dec(self.daily_pnl) + dec(realized_pnl))
+        self.available_capital = usdc(
+            dec(self.available_capital) + dec(position.cost_basis) + dec(realized_pnl)
+        )
 
         # Track consecutive wins/losses
         if realized_pnl >= 0:
@@ -178,11 +188,10 @@ class PortfolioManager:
 
     def get_snapshot(self) -> PortfolioSnapshot:
         """Generate a point-in-time portfolio snapshot."""
-        deployed = sum(p.cost_basis for p in self.open_positions)
-        unrealized = sum(p.unrealized_pnl for p in self.open_positions)
-        realized = sum(
-            (p.current_value - p.cost_basis)
-            for p in self.closed_positions
+        deployed = usdc(sum(dec(p.cost_basis) for p in self.open_positions))
+        unrealized = usdc(sum(dec(p.unrealized_pnl) for p in self.open_positions))
+        realized = usdc(
+            sum(dec(p.current_value) - dec(p.cost_basis) for p in self.closed_positions)
         )
 
         winning = sum(

@@ -75,11 +75,7 @@ class TelegramAlerts:
     def send_message_sync(self, text: str):
         """Synchronous wrapper for send_message (for use in sync code)."""
         import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self.send_message(text))
-        except RuntimeError:
-            asyncio.run(self.send_message(text))
+        asyncio.run(self.send_message(text))
 
     # ── Alert Methods ──────────────────────────────────────────────
 
@@ -196,7 +192,10 @@ def setup_command_handlers(
     app = Application.builder().token(alerts.bot_token).build()
 
     def is_authorized(update: Update) -> bool:
-        return str(update.effective_chat.id) == str(alerts.chat_id)
+        return (
+            update.effective_user is not None
+            and str(update.effective_user.id) == str(alerts.chat_id)
+        )
 
     async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_authorized(update):

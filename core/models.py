@@ -8,6 +8,8 @@ from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field
 
+from core.money import dec, pct, usdc
+
 
 class Side(str, Enum):
     """Trade side — buying YES or NO outcome tokens."""
@@ -77,11 +79,6 @@ class Market(BaseModel):
         delta = end_date - datetime.now(timezone.utc)
         return max(0, delta.total_seconds() / 3600)
     
-    @property
-    def midpoint(self) -> float:
-        """Midpoint price (average of YES price)."""
-        return self.yes_price
-
 
 class ProbabilityAssessment(BaseModel):
     """
@@ -163,10 +160,12 @@ class Position(BaseModel):
     def update_pnl(self, current_price: float):
         """Update P&L based on current market price."""
         self.current_price = current_price
-        self.current_value = self.size * current_price
-        self.unrealized_pnl = self.current_value - self.cost_basis
+        self.current_value = usdc(dec(self.size) * dec(current_price))
+        self.unrealized_pnl = usdc(dec(self.current_value) - dec(self.cost_basis))
         if self.cost_basis > 0:
-            self.unrealized_pnl_pct = (self.unrealized_pnl / self.cost_basis) * 100
+            self.unrealized_pnl_pct = pct(
+                (dec(self.unrealized_pnl) / dec(self.cost_basis)) * dec(100)
+            )
 
 
 class Trade(BaseModel):

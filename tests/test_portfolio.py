@@ -46,3 +46,28 @@ def test_daily_reset_clears_consecutive_loss_circuit_breaker(tmp_path, monkeypat
     assert can_trade is True
     assert reason == "OK"
     assert manager.consecutive_losses == 0
+
+
+def test_position_pnl_uses_decimal_backed_rounding(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    trade = make_trade(price=0.1, size=3, total_cost=0.3)
+    manager = PortfolioManager({"risk": {"starting_capital": 10.0}})
+    position = manager.record_trade(trade)
+
+    position.update_pnl(0.2)
+
+    assert position.current_value == 0.6
+    assert position.unrealized_pnl == 0.3
+    assert position.unrealized_pnl_pct == 100.0
+
+
+def test_record_trade_rejects_overspend(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    trade = make_trade(price=1.0, size=20, total_cost=20.0)
+    manager = PortfolioManager({"risk": {"starting_capital": 10.0}})
+
+    position = manager.record_trade(trade)
+
+    assert position is None
+    assert manager.available_capital == 10.0
+    assert manager.open_positions == []

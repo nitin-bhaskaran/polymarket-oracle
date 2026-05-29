@@ -74,6 +74,39 @@ def test_execute_trade_never_spends_more_than_available_capital():
     assert trade.total_cost == 42.0
 
 
+def test_execute_trade_reconciles_fill_from_order_details():
+    class FakeClient:
+        def create_and_post_market_order(self, order_args, options, order_type):
+            return {"orderID": "order-1"}
+
+        def get_order(self, order_id):
+            assert order_id == "order-1"
+            return {"price": "0.625", "size_matched": "16"}
+
+        def get_trades(self, params, only_first_page=False):
+            return []
+
+    trader = Trader(
+        {
+            "risk": {"max_position_pct": 10.0, "min_edge": 5.0},
+            "polymarket": {"private_key": "not-used", "tick_size": "0.001"},
+        }
+    )
+    trader.client = FakeClient()
+    trader._initialized = True
+
+    trade = trader.execute_trade(
+        market=make_market(yes_price=0.60),
+        assessment=make_assessment(probability=0.80, market_price=0.60),
+        available_capital=100.0,
+    )
+
+    assert trade.order_id == "order-1"
+    assert trade.price == 0.625
+    assert trade.size == 16.0
+    assert trade.total_cost == 10.0
+
+
 def test_close_position_returns_realized_pnl_in_dry_run():
     trader = Trader({"polymarket": {"private_key": "YOUR_PRIVATE_KEY_HERE"}})
     trader.initialize()
