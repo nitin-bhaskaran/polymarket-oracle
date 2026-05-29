@@ -37,6 +37,13 @@ def setup_logging(config: dict):
     # Create log directory
     Path(log_file).parent.mkdir(parents=True, exist_ok=True)
 
+    # Force UTF-8 on stdout so emoji in log messages don't crash the handler
+    # on Windows consoles (default cp1252 can't encode them).
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
     # Configure root logger
     logging.basicConfig(
         level=level,
@@ -44,7 +51,7 @@ def setup_logging(config: dict):
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_file),
+            logging.FileHandler(log_file, encoding="utf-8"),
         ]
     )
 

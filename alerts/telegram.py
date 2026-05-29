@@ -212,7 +212,15 @@ def setup_command_handlers(
     if not alerts.bot_token or alerts.bot_token == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
         return None
 
-    app = Application.builder().token(alerts.bot_token).build()
+    app = (
+        Application.builder()
+        .token(alerts.bot_token)
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
+        .pool_timeout(30.0)
+        .get_updates_read_timeout(40.0)
+        .build()
+    )
 
     def is_authorized(update: Update) -> bool:
         return (

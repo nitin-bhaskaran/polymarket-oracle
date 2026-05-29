@@ -72,7 +72,7 @@ class ProbabilityEngine:
         self.news_enabled = news_config.get("enabled", True)
         self.news_provider = news_config.get("provider", "gdelt")
         self.news_max_articles = news_config.get("max_articles", 5)
-        self.news_timeout = news_config.get("timeout_seconds", 10.0)
+        self.news_timeout = news_config.get("timeout_seconds", 20.0)
         self.news_language = news_config.get("language", "english")
 
         # Concurrency + rate-limit handling for batch assessment.
@@ -262,6 +262,10 @@ Remember: respond ONLY with the JSON format specified."""
         Call the Claude API, retrying on rate limits and transient API errors
         with exponential backoff. Returns the response object or None if all
         attempts fail.
+
+        Uses an assistant prefill of "{" so the model continues a JSON object
+        rather than narrating prose first — the most reliable way to get
+        structured output. _extract_text re-prepends the brace.
         """
         delay = self.retry_base_delay
         for attempt in range(1, self.max_retries + 1):
@@ -270,7 +274,10 @@ Remember: respond ONLY with the JSON format specified."""
                     model=self.model,
                     max_tokens=self.max_tokens,
                     system=ASSESSMENT_SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": user_prompt}],
+                    messages=[
+                        {"role": "user", "content": user_prompt},
+                        {"role": "assistant", "content": "{"},
+                    ],
                 )
             except anthropic.RateLimitError as e:
                 if attempt == self.max_retries:
@@ -300,39 +307,99 @@ Remember: respond ONLY with the JSON format specified."""
         Safely extract the first text block from a Claude response.
 
         Guards against non-text leading blocks (tool use, etc.) and empty
-        content rather than blindly indexing content[0].text.
+        content rather than blindly indexing content[0].text. Because we prefill
+        the assistant turn with "{", that opening brace is not echoed in the
+        response, so we re-prepend it to reconstruct the full JSON object.
         """
         content = getattr(response, "content", None) or []
         for block in content:
             text = getattr(block, "text", None)
             if text:
-                return text.strip()
+                text = text.strip()
+                # Re-attach the prefilled opening brace if the model continued
+                # the object without repeating it.
+                if not text.startswith("{") and not text.startswith("```"):
+                    text = "{" + text
+                return text
         return ""
+
+    @staticmethod
+    def _extract_json_object(text: str) -> Optional[str]:
+        """
+        Extract the first balanced top-level JSON object from arbitrary text.
+
+        Claude (especially newer models) often reasons in prose before emitting
+        the JSON, ignoring "respond ONLY with JSON". Rather than assume the whole
+        response is JSON, we scan for the first '{' and walk forward tracking
+        brace depth (ignoring braces inside strings) until it balances. Returns
+        the substring, or None if no balanced object is found.
+        """
+        if not text:
+            return None
+        start = text.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+        return None
 
     def _parse_response(self, response_text: str, market: Market) -> Optional[ProbabilityAssessment]:
         """
         Parse Claude's JSON response into a ProbabilityAssessment.
-        
-        Handles cases where Claude wraps JSON in markdown code blocks
-        or adds extra text.
+
+        Robust to the model wrapping JSON in markdown fences OR emitting prose
+        before/after the JSON object. We strip fences, then extract the first
+        balanced {...} object from whatever remains.
         """
         try:
-            # Clean up response — remove markdown code blocks if present
             text = response_text.strip()
+
+            # Strip markdown code fences if present.
             if text.startswith("```"):
-                # Remove first and last lines (code block markers)
                 lines = text.split("\n")
-                text = "\n".join(lines[1:-1])
-            
-            data = json.loads(text)
-            
+                # drop the opening fence line and a closing fence if present
+                if lines and lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip().startswith("```"):
+                    lines = lines[:-1]
+                text = "\n".join(lines)
+
+            # Try whole-text JSON first, then fall back to extracting an
+            # embedded object from surrounding prose.
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                candidate = self._extract_json_object(text)
+                if candidate is None:
+                    raise
+                data = json.loads(candidate)
+
             # Validate probability is in range
             prob = float(data.get("probability", 0.5))
             prob = max(0.01, min(0.99, prob))  # Clamp to avoid extremes
-            
+
             confidence = float(data.get("confidence", 0.5))
             confidence = max(0.0, min(1.0, confidence))
-            
+
             assessment = ProbabilityAssessment(
                 market_condition_id=market.condition_id,
                 question=market.question,
@@ -342,12 +409,12 @@ Remember: respond ONLY with the JSON format specified."""
                 key_factors=data.get("key_factors", []),
                 market_price=market.yes_price,
             )
-            
+
             # Calculate edge
             assessment.calculate_edge()
-            
+
             return assessment
-            
+
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning(f"Failed to parse Claude response: {e}\nResponse: {response_text[:200]}")
             return None
