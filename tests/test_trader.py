@@ -129,5 +129,8 @@ def test_close_position_returns_realized_pnl_in_dry_run():
     assert trade.success is True
     assert trade.order_id == "DRY_RUN_CLOSE"
     assert trade.side == Side.SELL
-    assert trade.total_cost == 3.0
-    assert trade.realized_pnl == -3.0
+    # Estimate applies the default 150bps SELL haircut: 0.30 * 0.985 = 0.2955.
+    # Proceeds = 10 shares * 0.2955 = 2.955; realized = 2.955 - 6.0 cost basis.
+    assert trade.price == 0.2955
+    assert trade.total_cost == 2.955
+    assert trade.realized_pnl == -3.045

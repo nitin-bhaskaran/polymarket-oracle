@@ -2,7 +2,7 @@
 Trader — Executes trades on Polymarket via the CLOB API.
 
 Handles order creation, submission, and status tracking.
-Uses the official py-clob-client SDK for authentication and signing.
+Uses the py-clob-client-v2 SDK for authentication and signing.
 """
 
 import logging
@@ -57,7 +57,7 @@ class Trader:
         self.clob_api_key = poly_config.get("clob_api_key", "")
         self.clob_api_secret = poly_config.get("clob_api_secret", "")
         self.clob_api_passphrase = poly_config.get("clob_api_passphrase", "")
-        self.tick_size = poly_config.get("tick_size", "0.01")
+        self.tick_size = self._normalize_tick_size(poly_config.get("tick_size", "0.01"))
         self.order_type = poly_config.get("order_type", "FOK")
         self.reconcile_fills = poly_config.get("reconcile_fills", True)
 
@@ -269,8 +269,16 @@ class Trader:
 
         The portfolio should only mark the position closed after this method
         returns a successful trade.
+
+        The pre-fill price estimate applies the same slippage band used for live
+        orders as a conservative haircut. Midpoint/last price overstates what a
+        market SELL actually clears in a thin book, which would make dry-run and
+        paper-trading P&L look better than reality. When trading live, the real
+        fill from _reconcile_fill() overrides this estimate.
         """
-        price = quantized_price(position.current_price or position.entry_price)
+        reference = quantized_price(position.current_price or position.entry_price)
+        # Haircut the estimate to the worst-acceptable SELL price.
+        price = self._price_limit(reference, TradeSide.SELL)
         proceeds = usdc(dec(position.size) * dec(price))
         trade = Trade(
             market_condition_id=position.market_condition_id,
@@ -281,7 +289,7 @@ class Trader:
             size=position.size,
             total_cost=proceeds,
             realized_pnl=usdc(dec(proceeds) - dec(position.cost_basis)),
-            market_price_at_trade=price,
+            market_price_at_trade=reference,
         )
 
         logger.info(
@@ -352,7 +360,12 @@ class Trader:
             return False
 
     def cancel_all_orders(self) -> bool:
-        """Cancel all open orders (emergency stop)."""
+        """
+        Cancel all open orders (emergency stop).
+
+        py-clob-client-v2 exposes cancel_all() which cancels every open order
+        for the account in one call.
+        """
         if not self._initialized or not self.client:
             return False
         try:
@@ -371,22 +384,45 @@ class Trader:
         reference_price: float,
     ) -> dict:
         """Create and post a CLOB V2 market order with slippage protection."""
-        if not self.client or MarketOrderArgs is None:
+        if not self.client:
             raise RuntimeError("CLOB client not initialized")
 
-        clob_side = ClobSide.BUY if side == TradeSide.BUY else ClobSide.SELL
         order_type = self._clob_order_type()
         price_limit = self._price_limit(reference_price, side)
 
-        return self.client.create_and_post_market_order(
-            order_args=MarketOrderArgs(
+        # When the real CLOB types are unavailable (e.g. in tests against a
+        # fake client), fall back to plain values so the call still exercises
+        # the client method. In production all four symbols are present.
+        clob_side = (
+            (ClobSide.BUY if side == TradeSide.BUY else ClobSide.SELL)
+            if ClobSide is not None
+            else side.value
+        )
+        if MarketOrderArgs is not None:
+            order_args = MarketOrderArgs(
                 token_id=token_id,
                 amount=amount,
                 side=clob_side,
                 price=price_limit,
                 order_type=order_type,
-            ),
-            options=PartialCreateOrderOptions(tick_size=self.tick_size),
+            )
+        else:
+            order_args = {
+                "token_id": token_id,
+                "amount": amount,
+                "side": clob_side,
+                "price": price_limit,
+                "order_type": order_type,
+            }
+        options = (
+            PartialCreateOrderOptions(tick_size=self.tick_size)
+            if PartialCreateOrderOptions is not None
+            else {"tick_size": self.tick_size}
+        )
+
+        return self.client.create_and_post_market_order(
+            order_args=order_args,
+            options=options,
             order_type=order_type,
         )
 
@@ -395,11 +431,50 @@ class Trader:
             return "FOK"
         return getattr(OrderType, self.order_type.upper(), OrderType.FOK)
 
+    @staticmethod
+    def _normalize_tick_size(value) -> str:
+        """
+        Coerce the configured tick size to one the CLOB API accepts.
+
+        py-clob-client-v2 only allows '0.1', '0.01', '0.001', '0.0001'. Anything
+        else is rejected at order time, so we validate up front and fall back to
+        the safe default of '0.01' with a warning rather than failing mid-trade.
+        """
+        allowed = {"0.1", "0.01", "0.001", "0.0001"}
+        text = str(value).strip()
+        if text in allowed:
+            return text
+        logger.warning(f"Invalid tick_size '{value}', falling back to '0.01'")
+        return "0.01"
+
     def _price_limit(self, reference_price: float, side: TradeSide) -> float:
-        slippage = self.slippage_bps / 10_000
+        """
+        Compute a slippage-protected worst-acceptable price for a market order.
+
+        BUY: pay at most reference * (1 + slippage), capped one tick below 1.0.
+        SELL: accept at least reference * (1 - slippage), floored one tick above 0.0.
+
+        The cap/floor are kept one tick inside [0, 1] (rather than a hard 0.99 /
+        0.01) so markets trading very near the bounds still leave room to fill.
+        The computed limit is logged so unexpected non-fills are explainable.
+        """
+        slippage = dec(self.slippage_bps) / dec(10_000)
+        tick = dec(self.tick_size) if self.tick_size else dec("0.01")
+        ref = dec(reference_price)
+
         if side == TradeSide.BUY:
-            return quantized_price(min(dec("0.99"), dec(reference_price) * (dec(1) + dec(slippage))))
-        return quantized_price(max(dec("0.01"), dec(reference_price) * (dec(1) - dec(slippage))))
+            ceiling = dec(1) - tick
+            limit = min(ceiling, ref * (dec(1) + slippage))
+        else:
+            floor = tick
+            limit = max(floor, ref * (dec(1) - slippage))
+
+        limit = quantized_price(limit)
+        logger.debug(
+            f"Price limit for {side.value}: ref={reference_price:.4f} "
+            f"slippage={self.slippage_bps}bps tick={self.tick_size} -> {limit:.4f}"
+        )
+        return limit
 
     def _reconcile_fill(
         self,
