@@ -34,7 +34,11 @@ def make_assessment(probability: float, market_price: float = 0.60) -> Probabili
 def test_execute_trade_buys_no_token_when_probability_is_below_market():
     trader = Trader(
         {
-            "risk": {"max_position_pct": 10.0, "min_edge": 5.0},
+            "risk": {
+                "max_position_pct": 10.0,
+                "min_edge": 5.0,
+                "use_kelly_sizing": False,
+            },
             "polymarket": {"private_key": "YOUR_PRIVATE_KEY_HERE"},
         }
     )
@@ -46,19 +50,24 @@ def test_execute_trade_buys_no_token_when_probability_is_below_market():
         available_capital=100.0,
     )
 
+    # Non-Kelly sizing scales the 10% ceiling by confidence (0.75) -> $7.50.
     assert trade.success is True
     assert trade.order_id == "DRY_RUN"
     assert trade.side == Side.BUY
     assert trade.outcome == Outcome.NO
     assert trade.token_id == "no-token"
-    assert trade.total_cost == 10.0
-    assert trade.size == 25.0
+    assert trade.total_cost == 7.5
+    assert trade.size == 18.75  # 7.50 / 0.40 NO price
 
 
 def test_execute_trade_never_spends_more_than_available_capital():
     trader = Trader(
         {
-            "risk": {"max_position_pct": 200.0, "min_edge": 5.0},
+            "risk": {
+                "max_position_pct": 200.0,
+                "min_edge": 5.0,
+                "use_kelly_sizing": False,
+            },
             "polymarket": {"private_key": "YOUR_PRIVATE_KEY_HERE"},
         }
     )
@@ -70,6 +79,7 @@ def test_execute_trade_never_spends_more_than_available_capital():
         available_capital=42.0,
     )
 
+    # Even with a 200% ceiling, the fraction is clamped to 1.0 of capital.
     assert trade is not None
     assert trade.total_cost == 42.0
 

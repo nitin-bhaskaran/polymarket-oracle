@@ -9,8 +9,9 @@ __pycache__/
 venv/
 .venv/
 
-# State files
-data/
+# State files (runtime) — but keep example/sample datasets
+data/*
+!data/backtest_sample.json
 logs/
 
 # Environment

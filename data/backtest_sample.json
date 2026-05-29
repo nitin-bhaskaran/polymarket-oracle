@@ -1,0 +1,10 @@
+[
+  {"question": "Edge YES, resolves YES (win)", "yes_price": 0.50, "ai_probability": 0.70, "confidence": 0.8, "outcome": 1, "spread": 0.01},
+  {"question": "Edge YES, resolves NO (loss)", "yes_price": 0.50, "ai_probability": 0.68, "confidence": 0.8, "outcome": 0, "spread": 0.01},
+  {"question": "Edge NO, resolves NO (win)", "yes_price": 0.60, "ai_probability": 0.40, "confidence": 0.75, "outcome": 0, "spread": 0.01},
+  {"question": "Edge NO, resolves YES (loss)", "yes_price": 0.55, "ai_probability": 0.35, "confidence": 0.7, "outcome": 1, "spread": 0.02},
+  {"question": "No edge, skipped", "yes_price": 0.50, "ai_probability": 0.51, "confidence": 0.9, "outcome": 1, "spread": 0.01},
+  {"question": "Strong edge YES, resolves YES (win)", "yes_price": 0.30, "ai_probability": 0.65, "confidence": 0.85, "outcome": 1, "spread": 0.015},
+  {"question": "Edge eaten by spread, skipped", "yes_price": 0.50, "ai_probability": 0.54, "confidence": 0.8, "outcome": 1, "spread": 0.08},
+  {"question": "Moderate edge YES, resolves YES (win)", "yes_price": 0.45, "ai_probability": 0.62, "confidence": 0.7, "outcome": 1, "spread": 0.01}
+]

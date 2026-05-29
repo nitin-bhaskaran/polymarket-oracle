@@ -42,6 +42,10 @@ class MarketScanner:
         
         # HTTP client with timeout and retry
         self.client = httpx.Client(timeout=30.0)
+
+        # Cache of the most recently scanned markets, keyed by condition_id.
+        # Used by position monitoring to look up expiry without re-fetching.
+        self._market_cache: dict[str, Market] = {}
     
     def fetch_active_events(self, limit: int = 50, offset: int = 0) -> list[dict]:
         """
@@ -205,7 +209,17 @@ class MarketScanner:
         
         # Sort by volume and cap
         filtered.sort(key=lambda m: m.volume_24h, reverse=True)
-        return filtered[:self.max_markets]
+        result = filtered[:self.max_markets]
+
+        # Cache every market we fetched (not just the capped/filtered set) so
+        # position monitoring can resolve expiry for any held position.
+        self._market_cache = {m.condition_id: m for m in all_markets}
+
+        return result
+
+    def get_market(self, condition_id: str) -> Optional[Market]:
+        """Return a cached Market by condition_id from the last scan, if present."""
+        return self._market_cache.get(condition_id)
     
     def _apply_filters(self, markets: list[Market]) -> list[Market]:
         """
@@ -272,6 +286,29 @@ class MarketScanner:
             return float(data.get("mid", 0))
         except Exception as e:
             logger.warning(f"Failed to get price for {token_id}: {e}")
+            return None
+
+    def get_spread(self, token_id: str) -> Optional[float]:
+        """
+        Get the current bid-ask spread for a specific token (0..1).
+
+        Uses the CLOB /spread endpoint. Returns None on failure so callers can
+        fall back to a conservative default rather than treating a fetch error
+        as a zero (free) spread.
+        """
+        try:
+            response = self.client.get(
+                f"{self.clob_url}/spread",
+                params={"token_id": token_id}
+            )
+            response.raise_for_status()
+            data = response.json()
+            spread = data.get("spread")
+            if spread is None:
+                return None
+            return float(spread)
+        except Exception as e:
+            logger.warning(f"Failed to get spread for {token_id}: {e}")
             return None
     
     def close(self):

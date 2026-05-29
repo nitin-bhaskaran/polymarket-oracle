@@ -13,6 +13,8 @@ import signal
 import sys
 import threading
 import time
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -185,6 +187,13 @@ class Oracle:
                 logger.info(f"Step 2: Assessing {len(markets)} markets...")
                 assessments = self.probability.batch_assess(markets)
 
+                # Map condition_id -> fresh YES probability, for the edge-closed
+                # exit rule on any positions we hold in those markets.
+                fair_probabilities = {
+                    a.market_condition_id: a.estimated_probability
+                    for a in assessments
+                }
+
                 # Filter for actionable edge
                 min_edge = self.config.get("risk", {}).get("min_edge", 5.0) / 100
                 actionable = [a for a in assessments if a.abs_edge >= min_edge]
@@ -213,11 +222,25 @@ class Oracle:
                         logger.warning(f"Stopping trades: {reason}")
                         break
 
+                    # Fetch the live spread for the token we'd actually buy, so
+                    # sizing accounts for the cost of crossing it. Fall back to a
+                    # conservative default if the spread fetch fails (never 0).
+                    buy_token = (
+                        market.yes_token_id if assessment.edge > 0
+                        else market.no_token_id
+                    )
+                    spread = self.scanner.get_spread(buy_token)
+                    if spread is None:
+                        spread = self.config.get("risk", {}).get(
+                            "default_spread_pct", 2.0
+                        ) / 100
+
                     # Execute
                     trade = self.trader.execute_trade(
                         market=market,
                         assessment=assessment,
                         available_capital=self.portfolio.available_capital,
+                        spread=spread,
                     )
 
                     if trade:
@@ -226,13 +249,18 @@ class Oracle:
 
                 # ── STEP 4: MONITOR ──
                 logger.info("Step 4: Monitoring positions...")
-                self._monitor_positions()
+                self._monitor_positions(fair_probabilities=fair_probabilities)
 
                 # ── STEP 5: REPORT ──
                 # Send daily summary at end of each cycle
                 if cycle_count % 12 == 0:  # Every ~1 hour (12 x 5 min)
                     snapshot = self.portfolio.get_snapshot()
                     self.alerts.alert_daily_summary(snapshot)
+
+                # Heartbeat — write a small health file every cycle so external
+                # monitoring (or you) can confirm the bot is alive and see its
+                # last-known state without parsing logs.
+                self._write_heartbeat(cycle_count)
 
                 # Log cycle time
                 elapsed = time.time() - cycle_start
@@ -321,34 +349,81 @@ class Oracle:
         self._telegram_thread.start()
         logger.info("Telegram command handlers started (supervised)")
 
-    def _monitor_positions(self):
-        """Update positions and check stop-losses."""
+    def _write_heartbeat(self, cycle_count: int):
+        """
+        Write a small JSON health file with the bot's last-known state.
+
+        External monitoring can check the file's mtime to confirm the bot is
+        alive and read the contents for a quick state summary. Failures here
+        are non-fatal — a heartbeat write must never crash the trading loop.
+        """
+        try:
+            snapshot = self.portfolio.get_snapshot()
+            health = {
+                "last_cycle_at": datetime.now(timezone.utc).isoformat(),
+                "cycle_count": cycle_count,
+                "running": self.running,
+                "dry_run": self.dry_run,
+                "trading_paused": self.alerts.trading_paused,
+                "available_capital": snapshot.available_capital,
+                "total_value": snapshot.total_value,
+                "open_positions": snapshot.open_positions,
+                "daily_pnl": snapshot.daily_pnl,
+            }
+            path = Path("data/health.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(health, f, indent=2, default=str)
+        except Exception as e:
+            logger.warning(f"Failed to write heartbeat: {e}")
+
+    def _monitor_positions(self, fair_probabilities: dict = None):
+        """
+        Update positions and evaluate all exit rules.
+
+        Args:
+            fair_probabilities: optional map of market_condition_id -> fresh AI
+                YES-probability from this cycle's assessments, used for the
+                edge-closed exit rule.
+        """
         if not self.portfolio.open_positions:
             return
 
-        # Build price lookup from scanner
+        # Build price lookup and expiry lookup from the scanner.
         price_lookup = {}
+        hours_to_expiry = {}
         for position in self.portfolio.open_positions:
             price = self.scanner.get_current_price(position.token_id)
             if price is not None:
                 price_lookup[position.token_id] = price
+            market = self.scanner.get_market(position.market_condition_id) \
+                if hasattr(self.scanner, "get_market") else None
+            if market is not None:
+                hours_to_expiry[position.market_condition_id] = market.hours_to_expiry
 
-        # Update positions
+        # Update positions to current prices.
         self.portfolio.update_positions(price_lookup)
 
-        # Check stop-losses
-        stop_loss_positions = self.portfolio.check_stop_losses()
-        for position in stop_loss_positions:
-            logger.warning(f"Closing position due to stop-loss: {position.market_condition_id}")
+        # Evaluate all exit rules: stop-loss, take-profit, edge-closed, expiry.
+        decisions = self.portfolio.positions_to_close(
+            fair_probabilities=fair_probabilities,
+            hours_to_expiry=hours_to_expiry,
+        )
+        for decision in decisions:
+            position = decision.position
+            logger.warning(
+                f"Closing position ({decision.reason.value}) "
+                f"{position.market_condition_id}: {decision.detail}"
+            )
             close_trade = self.trader.close_position(position)
             if not close_trade.success:
                 logger.error(
-                    f"Stop-loss close failed for {position.market_condition_id}: "
-                    f"{close_trade.error_message}"
+                    f"Close failed ({decision.reason.value}) for "
+                    f"{position.market_condition_id}: {close_trade.error_message}"
                 )
                 self.alerts.alert_error(
-                    f"Stop-loss close failed for {position.market_condition_id}: "
-                    f"{close_trade.error_message}"
+                    f"Close failed ({decision.reason.value}) for "
+                    f"{position.market_condition_id}: {close_trade.error_message}"
                 )
                 continue
 
@@ -358,6 +433,7 @@ class Oracle:
                 close_trade.price,
                 close_trade.realized_pnl or 0.0,
             )
+            self.alerts.alert_position_closed(position, decision.reason.value, close_trade)
 
         # Log summary
         snapshot = self.portfolio.get_snapshot()

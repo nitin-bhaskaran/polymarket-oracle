@@ -41,6 +41,12 @@ anthropic:
   # Keep false to reduce anchoring when asking for independent probabilities.
   include_market_price_in_prompt: false
 
+  # How many markets to assess concurrently per scan cycle.
+  max_concurrent_assessments: 4
+  # Retry on rate limits / transient API errors, with exponential backoff.
+  max_retries: 3
+  retry_base_delay_seconds: 2.0
+
 news:
   # Uses GDELT's public document API by default; no API key required.
   enabled: true
@@ -81,8 +87,30 @@ risk:
   # Worst-price buffer for market orders, in basis points (150 = 1.5%)
   market_order_slippage_bps: 150
 
-  # Stop loss per position (% of position value)
+  # ── Position sizing ──
+  # Use confidence/spread-aware fractional Kelly sizing. If false, falls back
+  # to a flat size = max_position_pct scaled by the model's confidence.
+  use_kelly_sizing: true
+  # Fraction of full Kelly to bet (0.25 = quarter Kelly, conservative).
+  kelly_fraction: 0.25
+  # Fallback spread (%) used for sizing when a live spread fetch fails.
+  default_spread_pct: 2.0
+
+  # ── Exit rules ──
+  # Close a position when unrealised loss exceeds this % of cost.
   stop_loss_pct: 50.0
+  # Close a position when unrealised gain exceeds this % of cost.
+  take_profit_pct: 50.0
+  # Close when the remaining edge for our side falls below this % (price has
+  # caught up to the AI's fair value, so the thesis is gone).
+  edge_exit_threshold_pct: 2.0
+  # Close any position within this many hours of market expiry/resolution.
+  exit_hours_before_expiry: 1.0
+  # Toggles for each exit rule.
+  enable_stop_loss: true
+  enable_take_profit: true
+  enable_edge_exit: true
+  enable_expiry_exit: true
 
   # Daily loss limit (% of capital)
   daily_loss_limit_pct: 15.0

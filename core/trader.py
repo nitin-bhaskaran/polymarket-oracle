@@ -33,6 +33,7 @@ from core.models import (
     Market, Outcome, Position, ProbabilityAssessment, Side as TradeSide, Trade
 )
 from core.money import dec, price as quantized_price, shares, usdc
+from core.sizing import SizingConfig, SizingInputs, compute_position_size
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,10 @@ class Trader:
         self.max_position_pct = risk_config.get("max_position_pct", 10.0) / 100
         self.min_edge = risk_config.get("min_edge", 5.0) / 100
         self.slippage_bps = risk_config.get("market_order_slippage_bps", 150)
+
+        # Sizing parameters (confidence/spread-aware fractional Kelly)
+        self.use_kelly = risk_config.get("use_kelly_sizing", True)
+        self.kelly_fraction = risk_config.get("kelly_fraction", 0.25)
 
         # Dry run mode — log trades but don't execute
         self.dry_run = False
@@ -138,6 +143,7 @@ class Trader:
         market: Market,
         assessment: ProbabilityAssessment,
         available_capital: float,
+        spread: float = 0.0,
     ) -> Optional[Trade]:
         """
         Execute a trade based on the probability assessment.
@@ -157,29 +163,53 @@ class Trader:
             )
             return None
 
-        # Determine trade direction
+        # Determine trade direction and the fair probability for THAT side.
         if assessment.edge > 0:
             # AI thinks YES is more likely than market does → BUY YES
             token_id = market.yes_token_id
             outcome = Outcome.YES
             side = TradeSide.BUY
             price = market.yes_price
+            fair_prob = assessment.estimated_probability
         else:
             # AI thinks NO is more likely → BUY NO
             token_id = market.no_token_id
             outcome = Outcome.NO
             side = TradeSide.BUY
             price = market.no_price
+            # Fair probability of NO is the complement of the YES estimate.
+            fair_prob = 1.0 - assessment.estimated_probability
 
         if price <= 0:
             logger.warning(f"Invalid token price ${price:.3f}, skipping")
             return None
 
-        # Calculate position size
-        max_spend = usdc(min(
-            dec(available_capital) * dec(self.max_position_pct),
-            dec(available_capital),
-        ))
+        # Calculate position size — confidence/spread-aware fractional Kelly,
+        # clamped to the max-position ceiling and available capital.
+        max_spend = compute_position_size(
+            SizingInputs(
+                available_capital=available_capital,
+                entry_price=price,
+                fair_probability=fair_prob,
+                confidence=assessment.confidence,
+                spread=spread,
+            ),
+            SizingConfig(
+                max_position_pct=self.max_position_pct,
+                kelly_fraction=self.kelly_fraction,
+                min_trade_usd=1.0,
+                use_kelly=self.use_kelly,
+            ),
+        )
+
+        if max_spend <= 0:
+            logger.info(
+                f"Sizing returned $0 for '{market.question}' "
+                f"(edge {assessment.abs_edge:.1%}, conf {assessment.confidence:.0%}, "
+                f"spread {spread:.1%}) — skipping"
+            )
+            return None
+
         # Size = how many shares we can buy at current price
         # Each share pays $1 if correct, costs $price
         size = shares(dec(max_spend) / dec(price)) if price > 0 else 0
