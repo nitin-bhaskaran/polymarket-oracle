@@ -104,27 +104,69 @@ The bot runs a **news-driven probability repricing** strategy:
 
 1. **Scan** — Fetches all active markets from Polymarket Gamma API
 2. **Filter** — Selects markets with sufficient liquidity and volume
-3. **Assess** — For each candidate, fetches recent public news and uses Claude to estimate true probability
+3. **Assess** — For each candidate, fetches recent public news and uses Claude to estimate true probability (concurrent, with rate-limit-aware retry)
 4. **Compare** — Calculates edge: `|AI_probability - market_price|`
-5. **Trade** — If edge exceeds threshold, places a trade via CLOB API
-6. **Monitor** — Tracks positions, P&L, and market movements
-7. **Alert** — Sends Telegram notifications for all actions
+5. **Size** — Confidence- and spread-aware fractional Kelly (see below)
+6. **Trade** — If edge exceeds threshold and survives the spread, places a trade via CLOB API
+7. **Monitor** — Tracks positions, evaluates all exit rules, reconciles fills
+8. **Alert** — Sends Telegram notifications for all actions
+
+### Position sizing
+
+Rather than a flat percentage per trade, the bot sizes each position by signal
+quality using fractional Kelly:
+
+```
+f* = (fair_prob - price) / (1 - price)      # full Kelly for a binary token
+size_fraction = f* × kelly_fraction × confidence
+```
+
+The result is clamped to `max_position_pct` and to available capital, and the
+half-spread is subtracted from the edge first — if the edge doesn't survive the
+spread, the trade is skipped. Set `use_kelly_sizing: false` to fall back to a
+flat confidence-scaled size.
+
+### Exit rules
+
+A position is closed on the first of: **near-expiry** (within
+`exit_hours_before_expiry`), **stop-loss**, **take-profit**, or **edge-closed**
+(the market price has caught up to the AI's fair value, so the thesis is gone).
+Each rule is independently toggleable in config.
 
 ## Risk Management
 
-- Maximum position size as % of capital (default: 10%)
+- Confidence/spread-aware position sizing, capped at `max_position_pct` (default 10%)
 - Maximum number of concurrent positions (default: 10)
-- Stop-loss per position (configurable)
+- Stop-loss and take-profit per position (configurable)
+- Edge-closed and near-expiry exits
 - Daily loss limit
 - Circuit breaker on consecutive losses
-- No trading on markets expiring within 1 hour
+- No trading on markets expiring too soon
+
+## Backtesting
+
+Before risking capital, test the edge/sizing premise on resolved markets:
+
+```bash
+python -m core.backtest --data data/backtest_sample.json --capital 130 --min-edge 0.05
+```
+
+The dataset (JSON or CSV) needs, per market: `yes_price`, `ai_probability`,
+`confidence`, `outcome` (1=YES, 0=NO), and optionally `spread`. The harness
+replays each row through the *same* sizing logic the live bot uses and reports
+win rate, ROI, and the AI's Brier calibration score. It makes no live API calls.
+
+## Health monitoring
+
+Each cycle writes `data/health.json` with a timestamp, cycle count, capital, and
+open-position count. Check its modification time to confirm the bot is alive.
 
 ## Current Build Stage
 
 This repo is in dry-run/paper-trading hardening. Live trading should wait until:
 
 - CLOB V2 order placement has been tested with a small funded wallet
-- Stop-loss sell paths and actual fills are reconciled against Polymarket in a live paper run
+- Stop-loss/exit sell paths and actual fills are reconciled against Polymarket in a live paper run
 - Probability assessments have enough fresh news/context for the target market categories
 - The test suite passes locally and on CI
 

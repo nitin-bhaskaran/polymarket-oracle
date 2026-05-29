@@ -15,6 +15,7 @@ from core.models import (
     Market, Outcome, Position, PortfolioSnapshot, Side, Trade
 )
 from core.money import dec, usdc
+from core.exits import ExitConfig, ExitDecision, evaluate_exit
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,18 @@ class PortfolioManager:
         self.stop_loss_pct = risk_config.get("stop_loss_pct", 50.0) / 100
         self.daily_loss_limit_pct = risk_config.get("daily_loss_limit_pct", 15.0) / 100
         self.consecutive_loss_limit = risk_config.get("consecutive_loss_limit", 5)
+
+        # Exit rules (stop-loss, take-profit, edge-closed, near-expiry)
+        self.exit_config = ExitConfig(
+            stop_loss_pct=self.stop_loss_pct,
+            take_profit_pct=risk_config.get("take_profit_pct", 50.0) / 100,
+            edge_exit_threshold=risk_config.get("edge_exit_threshold_pct", 2.0) / 100,
+            exit_hours_before_expiry=risk_config.get("exit_hours_before_expiry", 1.0),
+            enable_stop_loss=risk_config.get("enable_stop_loss", True),
+            enable_take_profit=risk_config.get("enable_take_profit", True),
+            enable_edge_exit=risk_config.get("enable_edge_exit", True),
+            enable_expiry_exit=risk_config.get("enable_expiry_exit", True),
+        )
 
         # State
         self.available_capital = self.starting_capital
@@ -139,23 +152,56 @@ class PortfolioManager:
             if position.token_id in price_lookup:
                 position.update_pnl(price_lookup[position.token_id])
 
-    def check_stop_losses(self) -> list[Position]:
+    def positions_to_close(
+        self,
+        fair_probabilities: Optional[dict[str, float]] = None,
+        hours_to_expiry: Optional[dict[str, float]] = None,
+    ) -> list[ExitDecision]:
         """
-        Check all positions against stop-loss thresholds.
+        Evaluate every open position against all exit rules.
 
-        Returns list of positions that should be closed.
+        Args:
+            fair_probabilities: optional map of market_condition_id -> fresh AI
+                YES-probability for this cycle, used by the edge-closed rule.
+            hours_to_expiry: optional map of market_condition_id -> hours until
+                the market resolves, used by the near-expiry rule.
+
+        Returns a list of ExitDecision for positions that should be closed.
         """
-        to_close = []
+        fair_probabilities = fair_probabilities or {}
+        hours_to_expiry = hours_to_expiry or {}
+        decisions: list[ExitDecision] = []
 
         for position in self.open_positions:
-            if position.unrealized_pnl_pct < -(self.stop_loss_pct * 100):
+            decision = evaluate_exit(
+                position,
+                self.exit_config,
+                current_fair_probability=fair_probabilities.get(
+                    position.market_condition_id
+                ),
+                hours_to_expiry=hours_to_expiry.get(position.market_condition_id),
+            )
+            if decision:
                 logger.warning(
-                    f"Stop loss triggered for {position.market_condition_id}: "
-                    f"{position.unrealized_pnl_pct:.1f}%"
+                    f"Exit ({decision.reason.value}) for "
+                    f"{position.market_condition_id}: {decision.detail}"
                 )
-                to_close.append(position)
+                decisions.append(decision)
 
-        return to_close
+        return decisions
+
+    def check_stop_losses(self) -> list[Position]:
+        """
+        Backward-compatible helper: positions hitting the stop-loss rule only.
+
+        Prefer positions_to_close(), which also covers take-profit, edge-closed,
+        and near-expiry exits.
+        """
+        return [
+            d.position
+            for d in self.positions_to_close()
+            if d.reason.value == "stop_loss"
+        ]
 
     def close_position(self, position: Position, close_price: float, realized_pnl: float):
         """Mark a position as closed and update accounting."""

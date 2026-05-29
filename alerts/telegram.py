@@ -151,6 +151,29 @@ class TelegramAlerts:
         msg = f"🚨 <b>Error</b>\n\n{error_msg}"
         self.send_message_sync(msg)
 
+    def alert_position_closed(self, position, reason: str, trade=None):
+        """Send alert when a position is closed, including the reason."""
+        if "position_closed" not in self.alert_events:
+            return
+
+        reason_emoji = {
+            "stop_loss": "🛑",
+            "take_profit": "🎯",
+            "edge_closed": "↩️",
+            "near_expiry": "⏰",
+        }.get(reason, "📤")
+
+        pnl = trade.realized_pnl if (trade and trade.realized_pnl is not None) else 0.0
+        pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+
+        msg = (
+            f"{reason_emoji} <b>Position Closed</b> ({reason.replace('_', ' ')})\n\n"
+            f"❓ {position.question}\n"
+            f"📊 {position.outcome.value} | {position.size:.1f} shares\n"
+            f"{pnl_emoji} Realized P&L: ${pnl:.2f}"
+        )
+        self.send_message_sync(msg)
+
     def alert_startup(self):
         """Send alert when bot starts."""
         msg = (

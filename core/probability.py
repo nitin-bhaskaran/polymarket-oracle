@@ -11,6 +11,8 @@ For each candidate market, this module:
 import json
 import logging
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -72,6 +74,12 @@ class ProbabilityEngine:
         self.news_max_articles = news_config.get("max_articles", 5)
         self.news_timeout = news_config.get("timeout_seconds", 10.0)
         self.news_language = news_config.get("language", "english")
+
+        # Concurrency + rate-limit handling for batch assessment.
+        anthropic_config = config.get("anthropic", {})
+        self.max_workers = anthropic_config.get("max_concurrent_assessments", 4)
+        self.max_retries = anthropic_config.get("max_retries", 3)
+        self.retry_base_delay = anthropic_config.get("retry_base_delay_seconds", 2.0)
         
         if not api_key or api_key == "YOUR_ANTHROPIC_API_KEY_HERE":
             raise ValueError("Anthropic API key not configured. Set it in config.yaml")
@@ -100,16 +108,16 @@ class ProbabilityEngine:
             # Step 2: Build the assessment prompt
             user_prompt = self._build_prompt(market, news_context)
             
-            # Step 3: Call Claude
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                system=ASSESSMENT_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_prompt}]
-            )
-            
+            # Step 3: Call Claude (with rate-limit aware retry)
+            response = self._call_claude_with_retry(user_prompt)
+            if response is None:
+                return None
+
             # Step 4: Parse response
-            response_text = response.content[0].text.strip()
+            response_text = self._extract_text(response)
+            if not response_text:
+                logger.warning(f"No text content in Claude response for {market.question}")
+                return None
             assessment = self._parse_response(response_text, market)
             
             if assessment:
@@ -249,6 +257,58 @@ Remember: respond ONLY with the JSON format specified."""
 
         return prompt
     
+    def _call_claude_with_retry(self, user_prompt: str):
+        """
+        Call the Claude API, retrying on rate limits and transient API errors
+        with exponential backoff. Returns the response object or None if all
+        attempts fail.
+        """
+        delay = self.retry_base_delay
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                return self.client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    system=ASSESSMENT_SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": user_prompt}],
+                )
+            except anthropic.RateLimitError as e:
+                if attempt == self.max_retries:
+                    logger.error(f"Rate limited after {attempt} attempts: {e}")
+                    return None
+                logger.warning(
+                    f"Rate limited (attempt {attempt}/{self.max_retries}), "
+                    f"retrying in {delay:.0f}s"
+                )
+                time.sleep(delay)
+                delay *= 2
+            except (anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
+                if attempt == self.max_retries:
+                    logger.error(f"API error after {attempt} attempts: {e}")
+                    return None
+                logger.warning(
+                    f"Transient API error (attempt {attempt}/{self.max_retries}), "
+                    f"retrying in {delay:.0f}s: {e}"
+                )
+                time.sleep(delay)
+                delay *= 2
+        return None
+
+    @staticmethod
+    def _extract_text(response) -> str:
+        """
+        Safely extract the first text block from a Claude response.
+
+        Guards against non-text leading blocks (tool use, etc.) and empty
+        content rather than blindly indexing content[0].text.
+        """
+        content = getattr(response, "content", None) or []
+        for block in content:
+            text = getattr(block, "text", None)
+            if text:
+                return text.strip()
+        return ""
+
     def _parse_response(self, response_text: str, market: Market) -> Optional[ProbabilityAssessment]:
         """
         Parse Claude's JSON response into a ProbabilityAssessment.
@@ -294,25 +354,37 @@ Remember: respond ONLY with the JSON format specified."""
     
     def batch_assess(self, markets: list[Market]) -> list[ProbabilityAssessment]:
         """
-        Assess multiple markets and return those with meaningful edge.
-        
-        Processes markets sequentially (Claude API is rate-limited anyway).
+        Assess multiple markets concurrently and return valid assessments.
+
+        Uses a bounded thread pool (max_concurrent_assessments) so a full scan
+        does not run strictly serially. Each worker retries on rate limits with
+        backoff. Results are sorted by absolute edge, highest first.
         """
-        assessments = []
-        
-        for market in markets:
-            assessment = self.assess_market(market)
-            if assessment:
-                assessments.append(assessment)
-        
+        assessments: list[ProbabilityAssessment] = []
+        if not markets:
+            return assessments
+
+        workers = max(1, min(self.max_workers, len(markets)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(self.assess_market, m): m for m in markets}
+            for future in as_completed(futures):
+                market = futures[future]
+                try:
+                    assessment = future.result()
+                except Exception as e:
+                    logger.error(f"Assessment task failed for {market.question}: {e}")
+                    continue
+                if assessment:
+                    assessments.append(assessment)
+
         # Sort by absolute edge, highest first
         assessments.sort(key=lambda a: a.abs_edge, reverse=True)
-        
+
         logger.info(
-            f"Assessed {len(markets)} markets, "
+            f"Assessed {len(markets)} markets ({workers} workers), "
             f"found {len(assessments)} valid assessments"
         )
-        
+
         return assessments
     
     def close(self):
