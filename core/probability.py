@@ -69,7 +69,7 @@ class ProbabilityEngine:
             "include_market_price_in_prompt", False
         )
         news_config = config.get("news", {})
-        self.news_enabled = news_config.get("enabled", True)
+        self.news_enabled = news_config.get("enabled", False)
         self.news_provider = news_config.get("provider", "gdelt")
         self.news_max_articles = news_config.get("max_articles", 5)
         self.news_timeout = news_config.get("timeout_seconds", 20.0)
@@ -253,7 +253,11 @@ NEWS & CONTEXT:
 TODAY'S DATE: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}
 
 Based on all available information, what is the TRUE probability that the answer is YES?
-Remember: respond ONLY with the JSON format specified."""
+
+IMPORTANT: Reply with ONLY the raw JSON object and nothing else — no preamble,
+no reasoning before it, no markdown code fences. Start your reply with {{ and
+end it with }}. Put any explanation inside the "reasoning" field, not outside
+the JSON."""
 
         return prompt
     
@@ -263,9 +267,10 @@ Remember: respond ONLY with the JSON format specified."""
         with exponential backoff. Returns the response object or None if all
         attempts fail.
 
-        Uses an assistant prefill of "{" so the model continues a JSON object
-        rather than narrating prose first — the most reliable way to get
-        structured output. _extract_text re-prepends the brace.
+        We do NOT prefill the assistant turn — some models reject assistant
+        prefill (400 invalid_request_error). Instead the prompt asks for JSON and
+        _parse_response robustly extracts the JSON object even when the model
+        wraps it in reasoning prose.
         """
         delay = self.retry_base_delay
         for attempt in range(1, self.max_retries + 1):
@@ -276,7 +281,6 @@ Remember: respond ONLY with the JSON format specified."""
                     system=ASSESSMENT_SYSTEM_PROMPT,
                     messages=[
                         {"role": "user", "content": user_prompt},
-                        {"role": "assistant", "content": "{"},
                     ],
                 )
             except anthropic.RateLimitError as e:
@@ -307,20 +311,13 @@ Remember: respond ONLY with the JSON format specified."""
         Safely extract the first text block from a Claude response.
 
         Guards against non-text leading blocks (tool use, etc.) and empty
-        content rather than blindly indexing content[0].text. Because we prefill
-        the assistant turn with "{", that opening brace is not echoed in the
-        response, so we re-prepend it to reconstruct the full JSON object.
+        content rather than blindly indexing content[0].text.
         """
         content = getattr(response, "content", None) or []
         for block in content:
             text = getattr(block, "text", None)
             if text:
-                text = text.strip()
-                # Re-attach the prefilled opening brace if the model continued
-                # the object without repeating it.
-                if not text.startswith("{") and not text.startswith("```"):
-                    text = "{" + text
-                return text
+                return text.strip()
         return ""
 
     @staticmethod
