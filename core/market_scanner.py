@@ -6,6 +6,7 @@ token IDs, prices, volume, and liquidity. No authentication needed for reads.
 """
 
 import logging
+import json
 from datetime import datetime
 from typing import Optional
 
@@ -28,6 +29,9 @@ class MarketScanner:
     def __init__(self, config: dict):
         self.gamma_url = config.get("polymarket", {}).get(
             "gamma_url", "https://gamma-api.polymarket.com"
+        )
+        self.clob_url = config.get("polymarket", {}).get(
+            "clob_url", "https://clob.polymarket.com"
         )
         self.min_liquidity = config.get("risk", {}).get("min_liquidity", 5000.0)
         self.min_volume_24h = config.get("risk", {}).get("min_volume_24h", 1000.0)
@@ -52,10 +56,11 @@ class MarketScanner:
             response = self.client.get(
                 f"{self.gamma_url}/events",
                 params={
+                    "active": "true",
                     "closed": "false",
                     "limit": limit,
                     "offset": offset,
-                    "order": "volume24hr",
+                    "order": "volume_24hr",
                     "ascending": "false",
                 }
             )
@@ -79,6 +84,25 @@ class MarketScanner:
             logger.error(f"Failed to fetch market {condition_id}: {e}")
             return None
     
+    @staticmethod
+    def _parse_json_list(value) -> list:
+        """Gamma sometimes returns list-like fields as JSON strings."""
+        if isinstance(value, list):
+            return value
+        if not value:
+            return []
+        try:
+            return json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return []
+
+    @staticmethod
+    def _as_float(value, default: float = 0.0) -> float:
+        try:
+            return float(value or default)
+        except (TypeError, ValueError):
+            return default
+
     def parse_market(self, raw_market: dict, event_context: dict = None) -> Optional[Market]:
         """
         Parse a raw Gamma API market object into our Market model.
@@ -89,17 +113,15 @@ class MarketScanner:
         - outcomes: JSON string like '["Yes", "No"]'
         """
         try:
-            import json
-            
             # Extract token IDs for YES and NO
-            clob_token_ids = json.loads(raw_market.get("clobTokenIds", "[]"))
+            clob_token_ids = self._parse_json_list(raw_market.get("clobTokenIds", []))
             if len(clob_token_ids) < 2:
                 return None
             
             # Extract current prices
-            outcome_prices = json.loads(raw_market.get("outcomePrices", "[]"))
-            yes_price = float(outcome_prices[0]) if outcome_prices else 0.0
-            no_price = float(outcome_prices[1]) if len(outcome_prices) > 1 else 1.0 - yes_price
+            outcome_prices = self._parse_json_list(raw_market.get("outcomePrices", []))
+            yes_price = self._as_float(outcome_prices[0]) if outcome_prices else 0.0
+            no_price = self._as_float(outcome_prices[1]) if len(outcome_prices) > 1 else 1.0 - yes_price
             
             # Parse end date
             end_date = None
@@ -112,6 +134,8 @@ class MarketScanner:
             
             # Determine status
             status = MarketStatus.ACTIVE
+            if not raw_market.get("active", True):
+                status = MarketStatus.CLOSED
             if raw_market.get("closed"):
                 status = MarketStatus.CLOSED
             if raw_market.get("resolved"):
@@ -128,11 +152,15 @@ class MarketScanner:
                 yes_price=yes_price,
                 no_price=no_price,
                 description=raw_market.get("description", ""),
-                category=raw_market.get("groupItemTitle", ""),
+                category=(
+                    raw_market.get("category")
+                    or raw_market.get("groupItemTitle", "")
+                    or (event_context or {}).get("category", "")
+                ),
                 end_date=end_date,
-                liquidity=float(raw_market.get("liquidity", 0) or 0),
-                volume_24h=float(raw_market.get("volume24hr", 0) or 0),
-                volume_total=float(raw_market.get("volume", 0) or 0),
+                liquidity=self._as_float(raw_market.get("liquidityNum", raw_market.get("liquidity", 0))),
+                volume_24h=self._as_float(raw_market.get("volume24hr", raw_market.get("volume_24hr", 0))),
+                volume_total=self._as_float(raw_market.get("volumeNum", raw_market.get("volume", 0))),
                 status=status,
                 event_title=event_context.get("title", "") if event_context else "",
                 event_slug=event_context.get("slug", "") if event_context else "",
@@ -215,7 +243,9 @@ class MarketScanner:
                 continue
             
             # Category filters
-            if self.include_categories and market.category:
+            if self.include_categories:
+                if not market.category:
+                    continue
                 if market.category.lower() not in [c.lower() for c in self.include_categories]:
                     continue
             if self.exclude_categories and market.category:
@@ -233,9 +263,8 @@ class MarketScanner:
         Uses the CLOB API endpoint for real-time price.
         """
         try:
-            clob_url = self.gamma_url.replace("gamma-api", "clob")
             response = self.client.get(
-                f"{clob_url}/midpoint",
+                f"{self.clob_url}/midpoint",
                 params={"token_id": token_id}
             )
             response.raise_for_status()
@@ -268,15 +297,20 @@ if __name__ == "__main__":
     scanner = MarketScanner(config)
     markets = scanner.scan()
     
-    print(f"\n{'='*80}")
-    print(f"Found {len(markets)} tradeable markets")
-    print(f"{'='*80}\n")
-    
+    logger.info("%s", "=" * 80)
+    logger.info("Found %s tradeable markets", len(markets))
+    logger.info("%s", "=" * 80)
+
     for i, m in enumerate(markets, 1):
-        print(f"{i:3d}. [{m.yes_price:.0%}] {m.question}")
-        print(f"     Event: {m.event_title}")
-        print(f"     Liquidity: ${m.liquidity:,.0f} | 24h Vol: ${m.volume_24h:,.0f}")
-        print(f"     Expires: {m.end_date or 'N/A'}")
-        print()
+        logger.info(
+            "%3d. [%s] %s | Event: %s | Liquidity: $%.0f | 24h Vol: $%.0f | Expires: %s",
+            i,
+            f"{m.yes_price:.0%}",
+            m.question,
+            m.event_title,
+            m.liquidity,
+            m.volume_24h,
+            m.end_date or "N/A",
+        )
     
     scanner.close()

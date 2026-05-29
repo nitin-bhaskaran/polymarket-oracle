@@ -3,10 +3,12 @@ Data models for Polymarket Oracle.
 Defines the core data structures used throughout the system.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field
+
+from core.money import dec, pct, usdc
 
 
 class Side(str, Enum):
@@ -71,14 +73,12 @@ class Market(BaseModel):
         """Hours until market closes. Returns 999999 if no end date."""
         if not self.end_date:
             return 999999.0
-        delta = self.end_date - datetime.utcnow()
+        end_date = self.end_date
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=timezone.utc)
+        delta = end_date - datetime.now(timezone.utc)
         return max(0, delta.total_seconds() / 3600)
     
-    @property
-    def midpoint(self) -> float:
-        """Midpoint price (average of YES price)."""
-        return self.yes_price
-
 
 class ProbabilityAssessment(BaseModel):
     """
@@ -111,19 +111,15 @@ class ProbabilityAssessment(BaseModel):
     recommended_side: Optional[Side] = None  # BUY YES or BUY NO
     
     # Timestamp
-    assessed_at: datetime = Field(default_factory=datetime.utcnow)
+    assessed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
     def calculate_edge(self):
         """Calculate the edge between AI estimate and market price."""
         self.edge = self.estimated_probability - self.market_price
         self.abs_edge = abs(self.edge)
         
-        # If AI thinks probability is HIGHER than market → BUY YES
-        # If AI thinks probability is LOWER than market → BUY NO
-        if self.edge > 0:
-            self.recommended_side = Side.BUY  # Buy YES tokens
-        else:
-            self.recommended_side = Side.SELL  # Buy NO tokens (sell YES equivalent)
+        # The trade side is BUY for both outcomes; the outcome token decides YES vs NO.
+        self.recommended_side = Side.BUY
 
 
 class Position(BaseModel):
@@ -151,7 +147,7 @@ class Position(BaseModel):
     unrealized_pnl_pct: float = 0.0
     
     # Timestamps
-    opened_at: datetime = Field(default_factory=datetime.utcnow)
+    opened_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at: Optional[datetime] = None
     
     # Assessment that triggered this trade
@@ -164,10 +160,12 @@ class Position(BaseModel):
     def update_pnl(self, current_price: float):
         """Update P&L based on current market price."""
         self.current_price = current_price
-        self.current_value = self.size * current_price
-        self.unrealized_pnl = self.current_value - self.cost_basis
+        self.current_value = usdc(dec(self.size) * dec(current_price))
+        self.unrealized_pnl = usdc(dec(self.current_value) - dec(self.cost_basis))
         if self.cost_basis > 0:
-            self.unrealized_pnl_pct = (self.unrealized_pnl / self.cost_basis) * 100
+            self.unrealized_pnl_pct = pct(
+                (dec(self.unrealized_pnl) / dec(self.cost_basis)) * dec(100)
+            )
 
 
 class Trade(BaseModel):
@@ -195,7 +193,7 @@ class Trade(BaseModel):
     realized_pnl: Optional[float] = None
     
     # Timestamps
-    executed_at: datetime = Field(default_factory=datetime.utcnow)
+    executed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
     # Status
     success: bool = True
@@ -204,7 +202,7 @@ class Trade(BaseModel):
 
 class PortfolioSnapshot(BaseModel):
     """Point-in-time snapshot of the entire portfolio."""
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
     # Capital
     total_capital: float  # Starting capital

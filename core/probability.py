@@ -10,7 +10,8 @@ For each candidate market, this module:
 
 import json
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from typing import Optional
 
 import anthropic
@@ -60,14 +61,23 @@ class ProbabilityEngine:
     
     def __init__(self, config: dict):
         api_key = config.get("anthropic", {}).get("api_key", "")
-        self.model = config.get("anthropic", {}).get("model", "claude-sonnet-4-20250514")
+        self.model = config.get("anthropic", {}).get("model", "claude-sonnet-4-6")
         self.max_tokens = config.get("anthropic", {}).get("max_tokens", 1024)
+        self.include_market_price = config.get("anthropic", {}).get(
+            "include_market_price_in_prompt", False
+        )
+        news_config = config.get("news", {})
+        self.news_enabled = news_config.get("enabled", True)
+        self.news_provider = news_config.get("provider", "gdelt")
+        self.news_max_articles = news_config.get("max_articles", 5)
+        self.news_timeout = news_config.get("timeout_seconds", 10.0)
+        self.news_language = news_config.get("language", "english")
         
         if not api_key or api_key == "YOUR_ANTHROPIC_API_KEY_HERE":
             raise ValueError("Anthropic API key not configured. Set it in config.yaml")
         
         self.client = anthropic.Anthropic(api_key=api_key)
-        self.news_client = httpx.Client(timeout=15.0)
+        self.news_client = httpx.Client(timeout=self.news_timeout)
     
     def assess_market(self, market: Market) -> Optional[ProbabilityAssessment]:
         """
@@ -85,7 +95,7 @@ class ProbabilityEngine:
         
         try:
             # Step 1: Gather news context
-            news_context = self._fetch_news_context(market.question, market.event_title)
+            news_context = self._fetch_news_context(market)
             
             # Step 2: Build the assessment prompt
             user_prompt = self._build_prompt(market, news_context)
@@ -120,27 +130,76 @@ class ProbabilityEngine:
             logger.error(f"Unexpected error assessing {market.question}: {e}")
             return None
     
-    def _fetch_news_context(self, question: str, event_title: str) -> str:
+    def _fetch_news_context(self, market: Market) -> str:
         """
         Fetch recent news relevant to the market question.
-        
-        Uses a simple web search approach. In production, you might
-        use a dedicated news API or web search tool.
-        
-        For now, we pass the question itself as context — Claude's
-        training data provides substantial baseline knowledge, and
-        the market description gives resolution criteria.
+
+        The default source is GDELT's public document API because it does
+        not require a key. Failures fall back to market context rather than
+        blocking the trading loop.
         """
-        # NOTE: For a more sophisticated version, integrate with:
-        # - Google News API
-        # - NewsAPI.org
-        # - Brave Search API
-        # - Or use Claude's web search tool
-        #
-        # For MVP, we rely on Claude's knowledge + market description.
-        # This is a key area for improvement in Phase 2.
-        
-        return f"Event context: {event_title}\nQuestion: {question}"
+        base_context = (
+            f"Event context: {market.event_title}\n"
+            f"Question: {market.question}\n"
+            f"Resolution criteria: {market.description or 'Not provided'}"
+        )
+        if not self.news_enabled:
+            return base_context
+        if self.news_provider.lower() != "gdelt":
+            logger.warning(f"Unsupported news provider '{self.news_provider}', using base context")
+            return base_context
+
+        try:
+            articles = self._fetch_gdelt_articles(market)
+        except Exception as e:
+            logger.warning(f"News fetch failed for {market.question}: {e}")
+            return base_context
+
+        if not articles:
+            return base_context + "\nRecent news: No relevant articles found."
+
+        lines = ["Recent news:"]
+        for article in articles[: self.news_max_articles]:
+            title = article.get("title") or "Untitled"
+            source = article.get("sourceCountry") or article.get("domain") or "unknown source"
+            date = article.get("seendate") or article.get("datetime") or "unknown date"
+            url = article.get("url") or ""
+            lines.append(f"- {title} ({source}, {date}) {url}".strip())
+
+        return base_context + "\n" + "\n".join(lines)
+
+    def _fetch_gdelt_articles(self, market: Market) -> list[dict]:
+        query = self._build_news_query(market)
+        response = self.news_client.get(
+            "https://api.gdeltproject.org/api/v2/doc/doc",
+            params={
+                "query": query,
+                "mode": "artlist",
+                "format": "json",
+                "sort": "hybridrel",
+                "maxrecords": self.news_max_articles,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("articles", []) or []
+
+    def _build_news_query(self, market: Market) -> str:
+        terms = []
+        for text in (market.event_title, market.question):
+            cleaned = self._clean_news_query(text)
+            if cleaned:
+                terms.append(f'"{cleaned}"')
+        if not terms:
+            terms.append(f'"{market.slug}"')
+        return f"({' OR '.join(terms[:2])}) sourcelang:{self.news_language}"
+
+    @staticmethod
+    def _clean_news_query(text: str) -> str:
+        text = re.sub(r"\s+", " ", text or "").strip()
+        text = re.sub(r"^(will|can|does|did|is|are)\s+", "", text, flags=re.IGNORECASE)
+        text = text.strip(" ?.")
+        return text[:160]
     
     def _build_prompt(self, market: Market, news_context: str) -> str:
         """Build the full assessment prompt for Claude."""
@@ -156,6 +215,14 @@ class ProbabilityEngine:
             else:
                 time_info = f"This market closes in {hours/720:.0f} months."
         
+        market_price_context = ""
+        if self.include_market_price:
+            market_price_context = (
+                f"- Current YES price: {market.yes_price:.2f} "
+                f"(market implies {market.yes_price:.0%} probability)\n"
+                f"- Current NO price: {market.no_price:.2f}\n"
+            )
+
         prompt = f"""PREDICTION MARKET QUESTION:
 {market.question}
 
@@ -168,15 +235,14 @@ EVENT CONTEXT:
 {time_info}
 
 MARKET DATA:
-- Current YES price: {market.yes_price:.2f} (market implies {market.yes_price:.0%} probability)
-- Current NO price: {market.no_price:.2f}
+{market_price_context}\
 - 24h Volume: ${market.volume_24h:,.0f}
 - Total Liquidity: ${market.liquidity:,.0f}
 
 NEWS & CONTEXT:
 {news_context}
 
-TODAY'S DATE: {datetime.utcnow().strftime('%Y-%m-%d')}
+TODAY'S DATE: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}
 
 Based on all available information, what is the TRUE probability that the answer is YES?
 Remember: respond ONLY with the JSON format specified."""
