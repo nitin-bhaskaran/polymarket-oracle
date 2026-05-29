@@ -53,6 +53,10 @@ cp config/config.example.yaml config/config.yaml
 python -m core.main
 ```
 
+For a credentials-light smoke test, `python -m core.main --scan-once` only
+exercises public market discovery and does not initialize the LLM or trading
+clients.
+
 ### GCP Deployment
 
 ```bash
@@ -86,6 +90,7 @@ All configuration is in `config/config.yaml`. See `config/config.example.yaml` f
 Key settings:
 - `polymarket.private_key`: Your Polygon wallet private key
 - `polymarket.funder_address`: Your Polymarket proxy wallet address
+- `polymarket.clob_api_*`: Optional pre-created CLOB V2 API credentials
 - `anthropic.api_key`: For AI probability assessment
 - `telegram.bot_token`: For trade alerts
 - `telegram.chat_id`: Your Telegram user ID
@@ -98,7 +103,7 @@ The bot runs a **news-driven probability repricing** strategy:
 
 1. **Scan** — Fetches all active markets from Polymarket Gamma API
 2. **Filter** — Selects markets with sufficient liquidity and volume
-3. **Assess** — For each candidate, fetches recent news and uses Claude to estimate true probability
+3. **Assess** — For each candidate, uses Claude to estimate true probability
 4. **Compare** — Calculates edge: `|AI_probability - market_price|`
 5. **Trade** — If edge exceeds threshold, places a trade via CLOB API
 6. **Monitor** — Tracks positions, P&L, and market movements
@@ -112,6 +117,15 @@ The bot runs a **news-driven probability repricing** strategy:
 - Daily loss limit
 - Circuit breaker on consecutive losses
 - No trading on markets expiring within 1 hour
+
+## Current Build Stage
+
+This repo is in dry-run/paper-trading hardening. Live trading should wait until:
+
+- CLOB V2 order placement has been tested with a small funded wallet
+- Stop-loss sell paths and actual fills are reconciled against Polymarket
+- Probability assessments include fresh news/context rather than only the market question
+- The test suite passes locally and on CI
 
 ## License
 

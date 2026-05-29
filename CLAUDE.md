@@ -5,9 +5,9 @@ Autonomous prediction market trading bot for Polymarket.
 
 ## Tech Stack
 - **Language**: Python 3.11+
-- **APIs**: Polymarket Gamma API (data), CLOB API (trading), Anthropic Claude API (probability), Telegram Bot API (alerts)
+- **APIs**: Polymarket Gamma API (data), CLOB V2 API (trading), Anthropic Claude API (probability), Telegram Bot API (alerts)
 - **Deployment**: GCP e2-micro VM, systemd
-- **Key packages**: py-clob-client, httpx, anthropic, python-telegram-bot, pyyaml, pydantic
+- **Key packages**: py-clob-client-v2, httpx, anthropic, python-telegram-bot, pyyaml, pydantic
 
 ## Commands
 ```
@@ -45,7 +45,7 @@ alerts/telegram.py     → Telegram notifications + /status /pause /stop command
 
 ## Gotchas
 - Polymarket clobTokenIds and outcomePrices are JSON strings inside JSON — need double-parse
-- py-clob-client requires deriving API creds before trading (2-step init)
+- py-clob-client-v2 requires L2 API creds before trading (configure them or derive via L1 auth)
 - Gamma API pagination uses offset/limit, max 50 per page
 - Market YES + NO prices should sum to ~1.0 but may not exactly
 - MarketOrderArgs.amount is USDC to spend, not number of shares

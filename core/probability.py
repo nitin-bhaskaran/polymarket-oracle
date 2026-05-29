@@ -10,7 +10,7 @@ For each candidate market, this module:
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import anthropic
@@ -62,6 +62,9 @@ class ProbabilityEngine:
         api_key = config.get("anthropic", {}).get("api_key", "")
         self.model = config.get("anthropic", {}).get("model", "claude-sonnet-4-20250514")
         self.max_tokens = config.get("anthropic", {}).get("max_tokens", 1024)
+        self.include_market_price = config.get("anthropic", {}).get(
+            "include_market_price_in_prompt", False
+        )
         
         if not api_key or api_key == "YOUR_ANTHROPIC_API_KEY_HERE":
             raise ValueError("Anthropic API key not configured. Set it in config.yaml")
@@ -156,6 +159,14 @@ class ProbabilityEngine:
             else:
                 time_info = f"This market closes in {hours/720:.0f} months."
         
+        market_price_context = ""
+        if self.include_market_price:
+            market_price_context = (
+                f"- Current YES price: {market.yes_price:.2f} "
+                f"(market implies {market.yes_price:.0%} probability)\n"
+                f"- Current NO price: {market.no_price:.2f}\n"
+            )
+
         prompt = f"""PREDICTION MARKET QUESTION:
 {market.question}
 
@@ -168,15 +179,14 @@ EVENT CONTEXT:
 {time_info}
 
 MARKET DATA:
-- Current YES price: {market.yes_price:.2f} (market implies {market.yes_price:.0%} probability)
-- Current NO price: {market.no_price:.2f}
+{market_price_context}\
 - 24h Volume: ${market.volume_24h:,.0f}
 - Total Liquidity: ${market.liquidity:,.0f}
 
 NEWS & CONTEXT:
 {news_context}
 
-TODAY'S DATE: {datetime.utcnow().strftime('%Y-%m-%d')}
+TODAY'S DATE: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}
 
 Based on all available information, what is the TRUE probability that the answer is YES?
 Remember: respond ONLY with the JSON format specified."""
