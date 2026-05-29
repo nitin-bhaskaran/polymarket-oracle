@@ -254,33 +254,72 @@ class Oracle:
         self._shutdown()
 
     def _start_telegram_commands(self):
-        """Start Telegram command polling in the background when configured."""
+        """
+        Start Telegram command polling in the background when configured.
+
+        The poller runs in a daemon thread. Because the /stop emergency control
+        depends on this thread being alive, we supervise it: if run_polling()
+        ever exits while the bot is still running, we rebuild the Application
+        and restart polling after a short backoff, and alert on each restart so
+        a persistently failing control surface is visible.
+        """
         from alerts.telegram import setup_command_handlers
 
-        self._telegram_app = setup_command_handlers(
-            alerts=self.alerts,
-            get_snapshot_fn=self.portfolio.get_snapshot,
-            get_positions_fn=lambda: self.portfolio.open_positions,
-            pause_fn=lambda: logger.info("Trading paused via Telegram"),
-            resume_fn=lambda: logger.info("Trading resumed via Telegram"),
-            emergency_stop_fn=self.trader.cancel_all_orders,
-        )
+        def build_app():
+            return setup_command_handlers(
+                alerts=self.alerts,
+                get_snapshot_fn=self.portfolio.get_snapshot,
+                get_positions_fn=lambda: self.portfolio.open_positions,
+                pause_fn=lambda: logger.info("Trading paused via Telegram"),
+                resume_fn=lambda: logger.info("Trading resumed via Telegram"),
+                emergency_stop_fn=self.trader.cancel_all_orders,
+            )
+
+        # Probe once so we can no-op cleanly when Telegram isn't configured.
+        self._telegram_app = build_app()
         if not self._telegram_app:
             return
 
-        def run_polling():
-            try:
-                self._telegram_app.run_polling(stop_signals=None)
-            except Exception as e:
-                logger.error(f"Telegram command polling stopped: {e}", exc_info=True)
+        def supervise():
+            backoff = 5
+            max_backoff = 300
+            first = True
+            while self.running or first:
+                first = False
+                try:
+                    if self._telegram_app is None:
+                        self._telegram_app = build_app()
+                    if self._telegram_app is None:
+                        return
+                    self._telegram_app.run_polling(stop_signals=None)
+                    # run_polling returned without raising — normal stop.
+                    if not self.running:
+                        return
+                    logger.warning("Telegram polling exited unexpectedly; restarting")
+                except Exception as e:
+                    logger.error(f"Telegram command polling crashed: {e}", exc_info=True)
+                    try:
+                        self.alerts.alert_error(
+                            f"Telegram command polling crashed and is restarting: {e}"
+                        )
+                    except Exception:
+                        pass
+
+                # Force a fresh Application on the next loop; a stopped PTB
+                # Application cannot be restarted in place.
+                self._telegram_app = None
+                if not self.running:
+                    return
+                time.sleep(backoff)
+                backoff = min(max_backoff, backoff * 2)
 
         self._telegram_thread = threading.Thread(
-            target=run_polling,
+            target=supervise,
             name="telegram-command-polling",
             daemon=True,
         )
         self._telegram_thread.start()
-        logger.info("Telegram command handlers started")
+        logger.info("Telegram command handlers started (supervised)")
 
     def _monitor_positions(self):
         """Update positions and check stop-losses."""
