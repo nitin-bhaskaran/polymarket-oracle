@@ -173,3 +173,15 @@ betfair_scanner:
   max_hours_ahead: 72.0       # ignore markets starting further out than this
   min_minutes_ahead: 5.0      # skip markets about to start / just gone live
   commission_rate: 0.05       # your Betfair commission rate (market base rate)
+
+# Paper-trading orchestrator (Betfair validation instrument)
+paper:
+  store_path: "data/paper_bets.jsonl"
+  passive_timeout_seconds: 1800   # resting in-play limit orders expire after this
+  max_bets_per_cycle: 5
+
+# Per-runner assessment edge threshold for Betfair
+betfair_assessor:
+  min_edge: 0.05                  # 5% edge vs overround-adjusted fair prob
+  normalise_probabilities: false  # normalise AI runner probs to sum to 1
+  max_runners_per_market: 8
