@@ -178,11 +178,22 @@ betfair_scanner:
 # Paper-trading orchestrator (Betfair validation instrument)
 paper:
   store_path: "data/paper_bets.jsonl"
+  governor_state_path: "data/governor.json"
   passive_timeout_seconds: 1800   # resting in-play limit orders expire after this
   max_bets_per_cycle: 5
+  # Cost governor
+  daily_deep_assessment_budget: 50   # hard cap on web-search assessments/day (~$10/day)
+  reassess_after_hours: 6.0          # re-assess a cached market only after this long
+  reassess_on_move: 0.05             # ...or if odds moved >= 5% on a runner
+  scan_interval: 1800                # 30-min cycle (pre-event markets move slowly)
 
 # Per-runner assessment edge threshold for Betfair
 betfair_assessor:
-  min_edge: 0.05                  # 5% edge vs overround-adjusted fair prob
-  normalise_probabilities: false  # normalise AI runner probs to sum to 1
+  min_edge: 0.05                  # actionable edge after deep assessment
+  normalise_probabilities: false
   max_runners_per_market: 8
+  # Two-stage cost control: cheap triage model + expensive deep model w/ web search
+  triage_model: "claude-haiku-4-5-20251001"
+  deep_model: "claude-sonnet-4-6"
+  triage_edge: 0.04               # promote to deep web-search assess if rough edge >= this
+  web_search_max_uses: 3          # max web searches per deep assessment

@@ -29,6 +29,8 @@ except ImportError:
 from core.betfair_client import BetfairClient
 from core.betfair_scanner import BetfairScanner
 from core.betfair_assessor import BetfairAssessor
+from core.betfair_assessor2 import TwoStageAssessor
+from core.assessment_cache import AssessmentGovernor
 from core.betfair_paper import BetfairPaperTrader
 
 logger = logging.getLogger("betfair.main")
@@ -83,13 +85,16 @@ def load_config(path: str = "config/config.yaml") -> dict:
 def build(config):
     client = BetfairClient(config)
     scanner = BetfairScanner(config, client=client)
-    assessor = BetfairAssessor(config)
-    trader = BetfairPaperTrader(config, scanner, assessor)
-    return client, scanner, assessor, trader
+    assessor = BetfairAssessor(config)  # single-stage fallback
+    two_stage = TwoStageAssessor(config)
+    governor = AssessmentGovernor(config)
+    trader = BetfairPaperTrader(config, scanner, assessor,
+                                two_stage=two_stage, governor=governor)
+    return client, scanner, assessor, trader, two_stage, governor
 
 
 def scan_once(config):
-    client, scanner, assessor, trader = build(config)
+    client, scanner, assessor, trader, two_stage, governor = build(config)
     if not client.login():
         logger.error("Login failed — check credentials and account status")
         return
@@ -102,7 +107,7 @@ def scan_once(config):
 
 
 def assess_once(config):
-    client, scanner, assessor, trader = build(config)
+    client, scanner, assessor, trader, two_stage, governor = build(config)
     if not client.login():
         logger.error("Login failed")
         return
@@ -116,7 +121,7 @@ def assess_once(config):
 
 
 def run_paper(config):
-    client, scanner, assessor, trader = build(config)
+    client, scanner, assessor, trader, two_stage, governor = build(config)
     if not client.login():
         logger.error("Login failed")
         return
@@ -138,11 +143,41 @@ def run_paper(config):
         client.close()
 
 
+def deep_once(config):
+    client, scanner, assessor, trader, two_stage, governor = build(config)
+    if not client.login():
+        logger.error("Login failed")
+        return
+    markets = scanner.scan()
+    logger.info(f"Two-stage assessing up to 3 markets (triage -> web-search deep)...")
+    done = 0
+    for m in markets:
+        if done >= 3:
+            break
+        best_edge, _ = two_stage.triage(m)
+        logger.info(f"  TRIAGE {m.event_name} — {m.market_name}: best rough edge {best_edge:.1%}")
+        if best_edge < two_stage.triage_edge:
+            logger.info("    below triage threshold; skipping deep assess")
+            continue
+        if not governor.can_deep_assess():
+            logger.info("    daily deep budget exhausted")
+            break
+        logger.info("    -> deep web-search assessment:")
+        for a in two_stage.deep_assess(m):
+            logger.info(f"       {a.runner_name}: AI {a.estimated_probability:.1%} "
+                        f"vs fair {a.market_fair_prob:.1%} | edge {a.edge:+.1%} -> "
+                        f"{a.recommended_side.value if a.recommended_side else '-'}")
+        governor.record_deep_assessment()
+        done += 1
+    logger.info(f"Deep budget remaining today: {governor.deep_budget_remaining()}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Betfair paper trader")
     ap.add_argument("--config", default="config/config.yaml")
     ap.add_argument("--scan-once", action="store_true")
     ap.add_argument("--assess-once", action="store_true")
+    ap.add_argument("--deep-once", action="store_true")
     ap.add_argument("--paper", action="store_true")
     args = ap.parse_args()
 
@@ -153,6 +188,8 @@ def main():
         scan_once(config)
     elif args.assess_once:
         assess_once(config)
+    elif args.deep_once:
+        deep_once(config)
     else:
         run_paper(config)
 

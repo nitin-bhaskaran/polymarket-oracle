@@ -35,10 +35,13 @@ logger = logging.getLogger("betfair.paper")
 
 
 class BetfairPaperTrader:
-    def __init__(self, config, scanner, assessor, store=None, alerts=None):
+    def __init__(self, config, scanner, assessor, store=None, alerts=None,
+                 two_stage=None, governor=None):
         self.config = config
         self.scanner = scanner
         self.assessor = assessor
+        self.two_stage = two_stage      # optional TwoStageAssessor
+        self.governor = governor        # optional AssessmentGovernor
         self.store = store or PaperBetStore(
             config.get("paper", {}).get("store_path", "data/paper_bets.jsonl")
         )
@@ -69,6 +72,47 @@ class BetfairPaperTrader:
                        if b.status == PaperBetStatus.SETTLED)
         return self.starting_capital + realised - self._deployed()
 
+    # ── assessment routing (single-stage or two-stage + governor) ──
+
+    def _assess(self, market):
+        """
+        Return assessments for a market.
+
+        If a two-stage assessor + governor are configured, use the cost-
+        controlled path: skip markets the governor says don't need
+        reassessment; run cheap triage; only promote to the expensive
+        web-search deep assessment when the rough edge clears triage_edge AND
+        the daily deep-assessment budget allows. Otherwise fall back to the
+        single-stage assessor.
+        """
+        if not (self.two_stage and self.governor):
+            return self.assessor.assess_market(market)
+
+        # Skip if cached and unchanged.
+        if not self.governor.needs_assessment(market):
+            return []
+
+        # Stage 1: cheap triage (no web search).
+        best_edge, triage_assessments = self.two_stage.triage(market)
+        self.governor.record_assessment(market)  # mark seen regardless
+
+        if best_edge < self.two_stage.triage_edge:
+            return []  # not worth a deep look
+
+        # Stage 2: deep web-search assessment, budget permitting.
+        if not self.governor.can_deep_assess():
+            logger.info(
+                f"Daily deep-assessment budget exhausted "
+                f"({self.governor.daily_deep_budget}); skipping deep assess of "
+                f"{market.market_id}. Triage flagged edge {best_edge:.1%}."
+            )
+            return []  # do NOT act on triage-only edges; they're uninformed
+
+        logger.info(f"Triage flagged {market.market_id} (edge {best_edge:.1%}); deep-assessing")
+        deep = self.two_stage.deep_assess(market)
+        self.governor.record_deep_assessment()
+        return deep
+
     # ── one cycle ──
 
     def run_cycle(self):
@@ -80,7 +124,7 @@ class BetfairPaperTrader:
         for market in markets:
             if placed >= self.max_bets_per_cycle:
                 break
-            assessments = self.assessor.assess_market(market)
+            assessments = self._assess(market)
             for a in assessments:
                 if placed >= self.max_bets_per_cycle:
                     break
