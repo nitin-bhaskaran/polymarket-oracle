@@ -172,12 +172,82 @@ def deep_once(config):
     logger.info(f"Deep budget remaining today: {governor.deep_budget_remaining()}")
 
 
+def list_politics(config):
+    """
+    Diagnostic: show what POLITICS markets are currently trading on Betfair,
+    with liquidity and timing, and whether each would clear the scan filters.
+    Helps decide how much weight politics deserves in the paper run.
+    """
+    client, scanner, assessor, trader, two_stage, governor = build(config)
+    if not client.login():
+        logger.error("Login failed")
+        return
+
+    # Find the Politics event type id.
+    try:
+        ets = client.list_event_types()
+    except Exception as e:
+        logger.error(f"listEventTypes failed: {e}")
+        return
+    politics_id = None
+    for et in ets:
+        info = et.get("eventType", {})
+        name = info.get("name", "")
+        logger.info(f"  event type: {name} (id {info.get('id')}, {et.get('marketCount')} markets)")
+        if name.lower() == "politics":
+            politics_id = info.get("id")
+
+    if not politics_id:
+        logger.warning("No 'Politics' event type returned — none trading, or named differently above.")
+        return
+
+    logger.info(f"Politics event type id = {politics_id}; fetching markets...")
+    from datetime import datetime, timezone
+    cat = client.list_market_catalogue(
+        {"eventTypeIds": [str(politics_id)]},
+        max_results=100,
+        market_projection=["EVENT", "COMPETITION", "MARKET_START_TIME", "RUNNER_DESCRIPTION"],
+        sort="MAXIMUM_TRADED",
+    )
+    logger.info(f"Found {len(cat)} political markets. Fetching liquidity...")
+
+    ids = [c["marketId"] for c in cat if "marketId" in c][:50]
+    books = {}
+    for i in range(0, len(ids), scanner.book_batch_size):
+        chunk = ids[i:i + scanner.book_batch_size]
+        try:
+            for b in client.list_market_book(chunk):
+                books[b["marketId"]] = b
+        except Exception as e:
+            logger.warning(f"book batch failed: {e}")
+
+    shown = 0
+    for c in cat:
+        mid = c.get("marketId")
+        book = books.get(mid, {})
+        matched = book.get("totalMatched", 0.0) or 0.0
+        event = (c.get("event") or {}).get("name", "")
+        mname = c.get("marketName", "")
+        start = c.get("marketStartTime", "n/a")
+        clears = "PASS" if matched >= scanner.min_total_matched else "below-liquidity"
+        runners = ", ".join(r.get("runnerName", "") for r in (c.get("runners") or [])[:5])
+        logger.info(f"  [{clears}] £{matched:>12,.0f} | {event} — {mname} (starts {start})")
+        if runners:
+            logger.info(f"             runners: {runners}")
+        shown += 1
+        if shown >= 40:
+            break
+    logger.info("Note: 'starts' far in the future still PASS pre-event; the run's "
+                "min_hours_ahead only excludes near-live markets.")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Betfair paper trader")
     ap.add_argument("--config", default="config/config.yaml")
     ap.add_argument("--scan-once", action="store_true")
     ap.add_argument("--assess-once", action="store_true")
     ap.add_argument("--deep-once", action="store_true")
+    ap.add_argument("--list-politics", action="store_true")
     ap.add_argument("--paper", action="store_true")
     args = ap.parse_args()
 
@@ -190,6 +260,8 @@ def main():
         assess_once(config)
     elif args.deep_once:
         deep_once(config)
+    elif args.list_politics:
+        list_politics(config)
     else:
         run_paper(config)
 
