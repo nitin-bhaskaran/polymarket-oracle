@@ -115,3 +115,18 @@ def test_in_play_included_when_enabled():
     markets = s.scan()
     assert len(markets) == 1
     assert markets[0].phase == MarketPhase.IN_PLAY
+
+
+def test_excludes_markets_beyond_resolution_horizon():
+    """A market resolving far in the future (e.g. 2028/29 politics) is dropped."""
+    s = make_scanner()
+    # Start time ~2 years out, well beyond the 30-day default horizon.
+    s.client._catalogue[0]["marketStartTime"] = _start(24 * 365 * 2)
+    assert s.scan() == []
+
+
+def test_keeps_near_term_markets_within_horizon():
+    """A market resolving in ~3 weeks (e.g. a by-election) is kept."""
+    s = make_scanner()
+    s.client._catalogue[0]["marketStartTime"] = _start(24 * 21)  # 21 days
+    assert len(s.scan()) == 1

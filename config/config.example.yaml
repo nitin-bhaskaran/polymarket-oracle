@@ -172,8 +172,9 @@ betfair_scanner:
   catalogue_fetch: 200
   book_batch_size: 10         # markets per listMarketBook call (Betfair weight cap)
   min_total_matched: 1000.0   # £ matched liquidity floor
-  max_hours_ahead: 168.0      # look up to a week out (captures more pre-event politics/outrights)
+  max_hours_ahead: 168.0      # catalogue look-ahead floor (resolution horizon may widen it)
   min_hours_ahead: 3.0        # PRE-EVENT BUFFER: skip anything starting within 3h (avoids near-live state)
+  max_resolution_days: 30.0   # RESOLUTION HORIZON: skip markets resolving >30d out (unvalidatable in-window, e.g. 2028/29 politics)
   commission_rate: 0.05       # your Betfair commission rate (market base rate)
 
 # Paper-trading orchestrator (Betfair validation instrument)

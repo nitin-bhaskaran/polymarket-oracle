@@ -43,6 +43,13 @@ class BetfairScanner:
         # Pre-event lookahead window (hours). Markets starting beyond this are
         # ignored as too far out to assess usefully.
         self.max_hours_ahead = sc.get("max_hours_ahead", 72.0)
+        # Resolution-horizon ceiling: exclude markets that won't resolve within
+        # this many days. A market resolving in 2028/2029 produces no settled
+        # data in a multi-week validation window AND tends to show large,
+        # unfalsifiable edges. Markets resolve ~when they start (matches) or at
+        # the listed start time (elections/outrights), so marketStartTime is the
+        # resolution proxy. This is the upper bound; min_hours_ahead is the lower.
+        self.max_resolution_days = sc.get("max_resolution_days", 30.0)
         # Pre-event buffer: skip anything starting within this many hours, so the
         # model always assesses a stable, searchable pre-event state (not a
         # near-live or in-play market where its information is stale).
@@ -62,12 +69,15 @@ class BetfairScanner:
             logger.error("No Betfair session; scan aborted")
             return []
 
-        # 1. Build catalogue filter
+        # 1. Build catalogue filter. Upper time bound = resolution horizon
+        # (the widest we'd ever consider); precise lower/upper bounds applied
+        # per-market below.
         now = datetime.now(timezone.utc)
+        horizon_hours = max(self.max_hours_ahead, self.max_resolution_days * 24.0)
         market_filter = {
             "marketStartTime": {
                 "from": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "to": (now + timedelta(hours=self.max_hours_ahead)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "to": (now + timedelta(hours=horizon_hours)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             },
         }
         # Only constrain market types if configured; empty = all types (so
@@ -129,6 +139,11 @@ class BetfairScanner:
                 continue
             if market.phase == MarketPhase.PRE_EVENT:
                 if market.hours_to_start < self.min_hours_ahead:
+                    continue
+                # Exclude markets resolving beyond the validation horizon — they
+                # produce no settled data in-window and tend to show
+                # unfalsifiable edges.
+                if market.hours_to_start > self.max_resolution_days * 24.0:
                     continue
             markets.append(market)
 
