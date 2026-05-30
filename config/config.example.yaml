@@ -172,6 +172,8 @@ betfair_scanner:
   catalogue_fetch: 200
   book_batch_size: 10         # markets per listMarketBook call (Betfair weight cap)
   min_total_matched: 1000.0   # £ matched liquidity floor
+  min_overround: 0.85         # OVERROUND SANITY: drop markets below this (not a real win-market)
+  max_overround: 1.20         # ...or above this (handicaps/lines/totals, ultra-thin specials)
   max_hours_ahead: 168.0      # catalogue look-ahead floor (resolution horizon may widen it)
   min_hours_ahead: 3.0        # PRE-EVENT BUFFER: skip anything starting within 3h (avoids near-live state)
   max_resolution_days: 30.0   # RESOLUTION HORIZON: skip markets resolving >30d out (unvalidatable in-window, e.g. 2028/29 politics)

@@ -130,3 +130,38 @@ def test_keeps_near_term_markets_within_horizon():
     s = make_scanner()
     s.client._catalogue[0]["marketStartTime"] = _start(24 * 21)  # 21 days
     assert len(s.scan()) == 1
+
+
+def test_excludes_broken_overround_market():
+    """A handicap-style book (overround ~147) is dropped before assessment."""
+    s = make_scanner()
+    # Two runners both at 1.01 -> implied ~0.99 each -> overround ~1.98+, and
+    # with many such rungs it blows up. Simulate the degenerate handicap.
+    s.client._books[0]["runners"] = [
+        {"selectionId": 11, "status": "ACTIVE", "lastPriceTraded": 1.01,
+         "totalMatched": 1000,
+         "ex": {"availableToBack": [{"price": 1.01, "size": 500}],
+                "availableToLay": [{"price": 1.02, "size": 500}]}},
+        {"selectionId": 12, "status": "ACTIVE", "lastPriceTraded": 1.01,
+         "totalMatched": 1000,
+         "ex": {"availableToBack": [{"price": 1.01, "size": 500}],
+                "availableToLay": [{"price": 1.02, "size": 500}]}},
+    ]
+    assert s.scan() == []
+
+
+def test_excludes_high_overround_novelty_market():
+    """An ultra-wide specials book (overround > max) is dropped."""
+    s = make_scanner()
+    # Many longshots -> sum of implied probs well above 1.2
+    s.client._books[0]["runners"] = [
+        {"selectionId": i, "status": "ACTIVE", "lastPriceTraded": 3.0,
+         "totalMatched": 1000,
+         "ex": {"availableToBack": [{"price": 3.0, "size": 100}],
+                "availableToLay": [{"price": 3.2, "size": 100}]}}
+        for i in range(1, 8)  # 7 runners ~ overround ~2.3
+    ]
+    s.client._catalogue[0]["runners"] = [
+        {"selectionId": i, "runnerName": f"R{i}"} for i in range(1, 8)
+    ]
+    assert s.scan() == []

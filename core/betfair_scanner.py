@@ -40,6 +40,16 @@ class BetfairScanner:
         self.catalogue_fetch = sc.get("catalogue_fetch", 200)
         self.book_batch_size = sc.get("book_batch_size", 10)
         self.min_total_matched = sc.get("min_total_matched", 1000.0)
+        # Overround sanity band. A genuine, liquid win-market sits near 1.0
+        # (roughly 0.85-1.20 depending on back/lay midpoint and book width).
+        # Markets far outside this are either not win-markets (handicaps, lines,
+        # totals — e.g. a Handicap showing overround 147) or too thin/wide to
+        # price meaningfully (novelty/outright specials e.g. "Next James Bond"
+        # at 15.7, a stage race at 5.4). The overround-adjustment maths assumes
+        # implied probs sum to ~1, so these would yield huge phantom edges on
+        # every runner. Exclude them before assessment.
+        self.min_overround = sc.get("min_overround", 0.85)
+        self.max_overround = sc.get("max_overround", 1.20)
         # Pre-event lookahead window (hours). Markets starting beyond this are
         # ignored as too far out to assess usefully.
         self.max_hours_ahead = sc.get("max_hours_ahead", 72.0)
@@ -134,6 +144,15 @@ class BetfairScanner:
                 continue
             # Filters
             if market.total_matched < self.min_total_matched:
+                continue
+            # Overround sanity: drop markets whose book doesn't behave like a
+            # win-market (handicaps/lines/totals, or ultra-thin specials). These
+            # would produce phantom edges under overround adjustment.
+            ovr = market.overround
+            if ovr < self.min_overround or ovr > self.max_overround:
+                logger.debug(f"Skipping {market.market_id} ({market.market_name}): "
+                             f"overround {ovr:.2f} outside "
+                             f"[{self.min_overround}, {self.max_overround}]")
                 continue
             if not self.in_play_enabled and market.in_play:
                 continue
