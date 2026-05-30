@@ -200,5 +200,8 @@ betfair_assessor:
   triage_model: "claude-haiku-4-5-20251001"
   deep_model: "claude-sonnet-4-6"
   triage_edge: 0.04               # promote to deep web-search assess if rough edge >= this
+  max_triage_edge: 0.40           # ...but treat edges above this as triage CONFUSION (near-certain market), skip
+  min_odds: 1.20                  # don't bet near-locks (odds below this)
+  max_odds: 21.0                  # ...or extreme longshots (odds above this)
   web_search_max_uses: 3          # max web searches per deep assessment
   deep_max_tokens: 4000           # bigger budget so search narration + JSON both fit
