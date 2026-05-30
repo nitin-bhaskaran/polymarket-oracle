@@ -187,6 +187,7 @@ paper:
   max_bets_per_cycle: 5
   # Cost governor
   daily_deep_assessment_budget: 50   # hard cap on web-search assessments/day (~$10/day)
+  deep_min_interval_seconds: 20.0    # min gap between deep assessments (stay under tokens/min rate limit)
   reassess_after_hours: 6.0          # re-assess a cached market only after this long
   reassess_on_move: 0.05             # ...or if odds moved >= 5% on a runner
   scan_interval: 1800                # 30-min cycle (pre-event markets move slowly)
@@ -203,5 +204,6 @@ betfair_assessor:
   max_triage_edge: 0.40           # ...but treat edges above this as triage CONFUSION (near-certain market), skip
   min_odds: 1.20                  # don't bet near-locks (odds below this)
   max_odds: 21.0                  # ...or extreme longshots (odds above this)
+  favourite_floor_fraction: 0.5   # reject market if AI gives favourite < this x its market prob (broken distribution)
   web_search_max_uses: 3          # max web searches per deep assessment
   deep_max_tokens: 4000           # bigger budget so search narration + JSON both fit
