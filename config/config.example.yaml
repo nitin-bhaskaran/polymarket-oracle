@@ -197,3 +197,4 @@ betfair_assessor:
   deep_model: "claude-sonnet-4-6"
   triage_edge: 0.04               # promote to deep web-search assess if rough edge >= this
   web_search_max_uses: 3          # max web searches per deep assessment
+  deep_max_tokens: 4000           # bigger budget so search narration + JSON both fit

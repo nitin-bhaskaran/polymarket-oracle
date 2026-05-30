@@ -46,9 +46,13 @@ DEEP_SYSTEM = """You are a professional betting analyst with web search. For the
 market, SEARCH for current, relevant information (recent form, team news, injuries, \
 lineups, head-to-head, anything affecting the outcome) BEFORE estimating. Then \
 estimate the TRUE probability of each runner winning as a distribution summing to 1.0. \
-Be calibrated and honest about uncertainty. After searching, reply with ONLY a raw \
-JSON object (no prose outside it):
-{"probabilities": {"<selection_id>": 0.XX, ...}, "confidence": 0.XX, "reasoning": "what the search found and your logic"}"""
+Be calibrated and honest about uncertainty.
+
+CRITICAL OUTPUT RULE: Keep any commentary to at most two short sentences. You MUST end \
+your response with the JSON object below and it must be complete. Do not write long \
+research summaries — put a brief justification inside the "reasoning" field, not before \
+the JSON. The final thing in your reply must be:
+{"probabilities": {"<selection_id>": 0.XX, ...}, "confidence": 0.XX, "reasoning": "brief"}"""
 
 
 class TwoStageAssessor:
@@ -59,6 +63,11 @@ class TwoStageAssessor:
         self.triage_model = bf.get("triage_model", "claude-haiku-4-5-20251001")
         self.deep_model = bf.get("deep_model", ac.get("model", "claude-sonnet-4-6"))
         self.max_tokens = ac.get("max_tokens", 1500)
+        # Web-search responses include the model's running commentary on search
+        # results BEFORE the answer; 1500 tokens gets consumed by narration on
+        # data-rich markets and the JSON never arrives. Give the deep call its
+        # own larger budget.
+        self.deep_max_tokens = bf.get("deep_max_tokens", 4000)
         self.triage_edge = bf.get("triage_edge", 0.04)   # promote to deep if rough edge >= this
         self.min_edge = bf.get("min_edge", 0.05)         # actionable edge after deep
         self.web_search_max_uses = bf.get("web_search_max_uses", 3)
@@ -215,7 +224,7 @@ class TwoStageAssessor:
             return []
         try:
             resp = self.client.messages.create(
-                model=self.deep_model, max_tokens=self.max_tokens,
+                model=self.deep_model, max_tokens=self.deep_max_tokens,
                 system=DEEP_SYSTEM,
                 tools=[{
                     "type": "web_search_20250305",
@@ -234,15 +243,50 @@ class TwoStageAssessor:
             1 for b in (getattr(resp, "content", None) or [])
             if getattr(b, "type", "") == "server_tool_use"
         )
+        stop = getattr(resp, "stop_reason", None)
         text = self._extract_text(resp)
         data = self._extract_json(text)
+
+        if (not data or "probabilities" not in data) and text:
+            # The model searched and narrated but didn't emit usable JSON (often
+            # because it hit max_tokens mid-prose). Salvage the work we paid for:
+            # a cheap, tool-free, JSON-only follow-up that converts its own
+            # findings into the structured answer. Much cheaper than re-searching.
+            logger.info(f"Deep assess {market.event_name}: no JSON (stop={stop}); "
+                        f"running salvage extraction call")
+            data = self._salvage_json(market, active, text)
+
         if not data or "probabilities" not in data:
-            # Loud failure: we paid for this (incl. web searches) and got nothing.
             logger.error(
                 f"Deep assess for {market.market_id} ({market.event_name}) returned "
-                f"no parseable probabilities after {searches} search(es). "
-                f"Response head: {text[:300]!r}"
+                f"no parseable probabilities after {searches} search(es) "
+                f"(stop_reason={stop}). Response head: {text[:300]!r}"
             )
             return []
         logger.info(f"Deep assess {market.event_name}: {searches} search(es), parsed OK")
         return self._to_assessments(market, active, data)
+
+    def _salvage_json(self, market, active, findings_text):
+        """
+        Convert a deep response's prose findings into the required JSON with a
+        cheap, tool-free follow-up call. Returns parsed dict or None.
+        """
+        ids = ", ".join(str(r.selection_id) for r in active)
+        prompt = (
+            "Below are research findings for a betting market. Convert them into "
+            "the required JSON ONLY — no other text.\n\n"
+            f"Selection IDs to include: {ids}\n\n"
+            f"FINDINGS:\n{findings_text[:6000]}\n\n"
+            'Reply with ONLY: {"probabilities": {"<selection_id>": 0.XX, ...}, '
+            '"confidence": 0.XX, "reasoning": "brief"} — probabilities must sum to 1.0.'
+        )
+        try:
+            resp = self.client.messages.create(
+                model=self.triage_model,  # cheap model is fine for reformatting
+                max_tokens=self.max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return self._extract_json(self._extract_text(resp))
+        except Exception as e:
+            logger.warning(f"Salvage extraction failed for {market.market_id}: {e}")
+            return None
