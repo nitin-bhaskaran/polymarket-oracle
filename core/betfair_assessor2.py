@@ -78,7 +78,55 @@ class TwoStageAssessor:
         return "\n".join(parts).strip()
 
     @staticmethod
-    def _extract_json(text: str) -> Optional[dict]:
+    def _all_json_objects(text: str) -> list[dict]:
+        """
+        Find ALL balanced top-level JSON objects in text (web-search responses
+        interleave narration with the answer, and the model may emit braces in
+        prose before the real JSON). Returns every parseable object, in order.
+        """
+        objs = []
+        i = 0
+        n = len(text)
+        while i < n:
+            if text[i] != "{":
+                i += 1
+                continue
+            depth = 0
+            in_str = False
+            esc = False
+            j = i
+            while j < n:
+                ch = text[j]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                else:
+                    if ch == '"':
+                        in_str = True
+                    elif ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            try:
+                                objs.append(json.loads(text[i:j + 1]))
+                            except json.JSONDecodeError:
+                                pass
+                            break
+                j += 1
+            i = j + 1
+        return objs
+
+    def _extract_json(self, text: str) -> Optional[dict]:
+        """
+        Extract the answer object. Prefer the LAST object that contains a
+        'probabilities' key (the model's final answer after any search
+        narration). Falls back to the last parseable object, then None.
+        """
         if not text:
             return None
         if text.startswith("```"):
@@ -88,34 +136,14 @@ class TwoStageAssessor:
             if lines and lines[-1].strip().startswith("```"):
                 lines = lines[:-1]
             text = "\n".join(lines)
-        start = text.find("{")
-        if start == -1:
+
+        objs = self._all_json_objects(text)
+        if not objs:
             return None
-        depth = 0
-        in_str = False
-        esc = False
-        for i in range(start, len(text)):
-            ch = text[i]
-            if in_str:
-                if esc:
-                    esc = False
-                elif ch == "\\":
-                    esc = True
-                elif ch == '"':
-                    in_str = False
-                continue
-            if ch == '"':
-                in_str = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start:i + 1])
-                    except json.JSONDecodeError:
-                        return None
-        return None
+        for obj in reversed(objs):
+            if isinstance(obj, dict) and "probabilities" in obj:
+                return obj
+        return objs[-1]  # last resort
 
     def _market_prompt(self, market: BetfairMarket, active: list[Runner]) -> str:
         lines = [
@@ -196,8 +224,25 @@ class TwoStageAssessor:
                 }],
                 messages=[{"role": "user", "content": self._market_prompt(market, active)}],
             )
-            data = self._extract_json(self._extract_text(resp))
         except Exception as e:
-            logger.warning(f"Deep assess failed for {market.market_id}: {e}")
+            logger.error(f"Deep assess API call failed for {market.market_id} "
+                         f"({market.event_name}): {e}")
             return []
+
+        # Count web searches actually performed (for cost visibility).
+        searches = sum(
+            1 for b in (getattr(resp, "content", None) or [])
+            if getattr(b, "type", "") == "server_tool_use"
+        )
+        text = self._extract_text(resp)
+        data = self._extract_json(text)
+        if not data or "probabilities" not in data:
+            # Loud failure: we paid for this (incl. web searches) and got nothing.
+            logger.error(
+                f"Deep assess for {market.market_id} ({market.event_name}) returned "
+                f"no parseable probabilities after {searches} search(es). "
+                f"Response head: {text[:300]!r}"
+            )
+            return []
+        logger.info(f"Deep assess {market.event_name}: {searches} search(es), parsed OK")
         return self._to_assessments(market, active, data)
