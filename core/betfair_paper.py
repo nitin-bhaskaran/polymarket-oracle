@@ -63,6 +63,17 @@ class BetfairPaperTrader:
         self.max_triage_edge = bf.get("max_triage_edge", 0.40)
         self.min_odds = bf.get("min_odds", 1.20)
         self.max_odds = bf.get("max_odds", 21.0)
+        # Favourite-floor: reject a market assessment if the AI gives the
+        # market's favourite less than this fraction of its market-implied
+        # probability (catches broken multi-runner distributions like a
+        # tournament favourite assessed at 1%). 0 disables.
+        self.favourite_floor_fraction = bf.get("favourite_floor_fraction", 0.5)
+
+        # Minimum seconds between deep (web-search) assessments, to stay under
+        # the org input-tokens-per-minute rate limit. Deep calls are
+        # token-heavy; spacing them avoids hard 429s that drop assessments.
+        self.deep_min_interval_s = config.get("paper", {}).get("deep_min_interval_seconds", 20.0)
+        self._last_deep_at = 0.0
 
         paper = config.get("paper", {})
         self.passive_timeout_s = paper.get("passive_timeout_seconds", 1800)
@@ -129,13 +140,62 @@ class BetfairPaperTrader:
             return []  # do NOT act on triage-only edges; they're uninformed
 
         logger.info(f"Triage flagged {market.market_id} (edge {best_edge:.1%}); deep-assessing")
+        # Space deep assessments apart: each pulls web-search results into
+        # context (token-heavy), and several within a minute trip the org's
+        # input-tokens-per-minute rate limit (hard 429s that drop assessments).
+        # A deliberate gap keeps us under the limit with clean, gap-free data.
+        self._respect_deep_spacing()
         deep = self.two_stage.deep_assess(market)
+        self._last_deep_at = time.monotonic()
         self.governor.record_deep_assessment()
+
+        # Favourite-floor coherence check. On a multi-runner market, the clearest
+        # distribution-construction failure is assigning the market's favourite an
+        # implausibly low probability (e.g. world #1 tennis favourite at 1%). When
+        # that happens the WHOLE distribution is misallocated — the probability
+        # stripped from the favourite inflates the other runners, so the
+        # mid-runner "edges" are just the flip side of the same error. So we
+        # reject the entire market assessment, not just the favourite's leg.
+        if deep and not self._favourite_plausible(market, deep):
+            return []
+
         # Drop assessments on extreme-priced runners: backing/laying a near-lock
         # (very long or very short odds) is where phantom edges and poor fills
         # concentrate, and Kelly on extreme odds is unreliable.
         deep = [a for a in deep if self._odds_in_band(a)]
         return deep
+
+    def _respect_deep_spacing(self):
+        """Sleep so deep assessments are at least deep_min_interval_s apart."""
+        if self.deep_min_interval_s <= 0:
+            return
+        elapsed = time.monotonic() - self._last_deep_at
+        wait = self.deep_min_interval_s - elapsed
+        if wait > 0:
+            logger.info(f"Spacing deep assessments: sleeping {wait:.0f}s to respect rate limit")
+            time.sleep(wait)
+
+    def _favourite_plausible(self, market, assessments) -> bool:
+        """
+        False if the AI assigned the market's favourite (shortest odds) a
+        probability far below its market-implied probability — a signature of a
+        broken multi-runner distribution. The floor is a fraction of the
+        favourite's overround-adjusted market probability.
+        """
+        # Identify favourite by highest market-fair prob among assessed runners.
+        fav = max(assessments, key=lambda a: a.market_fair_prob, default=None)
+        if fav is None or fav.market_fair_prob <= 0:
+            return True
+        floor = self.favourite_floor_fraction * fav.market_fair_prob
+        if fav.estimated_probability < floor:
+            logger.info(
+                f"Rejecting {market.market_id} ({market.event_name} / "
+                f"{market.market_name}): favourite {fav.runner_name} assessed at "
+                f"{fav.estimated_probability:.0%} vs market {fav.market_fair_prob:.0%} "
+                f"(floor {floor:.0%}) — implausible distribution, skipping whole market."
+            )
+            return False
+        return True
 
     def _odds_in_band(self, assessment) -> bool:
         """True if the side's odds are within the tradeable band (not a near-lock)."""

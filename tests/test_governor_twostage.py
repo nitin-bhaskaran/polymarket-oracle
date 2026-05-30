@@ -228,3 +228,107 @@ def test_extreme_odds_assessments_filtered():
     # Only the tradeable-odds assessment survives
     assert len(res) == 1
     assert res[0].best_back == 2.0
+
+
+# ── favourite-floor coherence guard ──
+
+def _twostage_returning(assessments):
+    from core.betfair_models import BetfairAssessment
+    class FakeTwoStage:
+        triage_edge = 0.04
+        def triage(self, market):
+            return 0.10, []
+        def deep_assess(self, market):
+            return assessments
+    return FakeTwoStage()
+
+
+def _assessment(sel, name, ai_p, fair_p, back):
+    from core.betfair_models import BetfairAssessment
+    a = BetfairAssessment(market_id="1.1", selection_id=sel, runner_name=name,
+                          question="?", estimated_probability=ai_p, confidence=0.7,
+                          market_fair_prob=fair_p, best_back=back, best_lay=back + 0.1)
+    a.calculate_edge()
+    return a
+
+
+def test_favourite_floor_rejects_broken_distribution():
+    """Favourite (market 32%) assessed at 1% -> whole market rejected."""
+    from core.betfair_paper import BetfairPaperTrader
+    class FakeScanner:
+        def scan(self): return []
+    cfg = {"risk": {}, "betfair_assessor": {"favourite_floor_fraction": 0.5},
+           "paper": {}}
+    g = _gov(daily_deep_assessment_budget=50)
+    # Sabalenka-like: favourite fair 32%, AI 1%; plus inflated mid-runners
+    assessments = [
+        _assessment(1, "Sabalenka", 0.01, 0.32, 3.45),
+        _assessment(2, "Gauff", 0.22, 0.07, 6.2),
+        _assessment(3, "Andreeva", 0.20, 0.09, 10.0),
+    ]
+    t = BetfairPaperTrader(cfg, FakeScanner(), assessor=None,
+                           two_stage=_twostage_returning(assessments),
+                           governor=g, store=_store())
+    assert t._assess(_market()) == []
+
+
+def test_favourite_floor_keeps_plausible_distribution():
+    """Favourite assessed near its market prob -> market kept, edges flow through."""
+    from core.betfair_paper import BetfairPaperTrader
+    class FakeScanner:
+        def scan(self): return []
+    cfg = {"risk": {}, "betfair_assessor": {"favourite_floor_fraction": 0.5,
+                                            "min_odds": 1.20, "max_odds": 21.0},
+           "paper": {}}
+    g = _gov(daily_deep_assessment_budget=50)
+    # Favourite fair 50%, AI 46% (well above floor of 25%) -> kept
+    assessments = [
+        _assessment(1, "A", 0.46, 0.50, 2.0),
+        _assessment(2, "B", 0.30, 0.30, 3.4),
+        _assessment(3, "C", 0.24, 0.20, 5.0),
+    ]
+    t = BetfairPaperTrader(cfg, FakeScanner(), assessor=None,
+                           two_stage=_twostage_returning(assessments),
+                           governor=g, store=_store())
+    res = t._assess(_market())
+    assert len(res) == 3  # all within odds band, market not rejected
+
+
+def test_favourite_floor_disabled_when_zero():
+    from core.betfair_paper import BetfairPaperTrader
+    class FakeScanner:
+        def scan(self): return []
+    cfg = {"risk": {}, "betfair_assessor": {"favourite_floor_fraction": 0.0,
+                                            "min_odds": 1.20, "max_odds": 21.0},
+           "paper": {}}
+    g = _gov(daily_deep_assessment_budget=50)
+    assessments = [
+        _assessment(1, "Sabalenka", 0.01, 0.32, 3.45),
+        _assessment(2, "Gauff", 0.22, 0.07, 6.2),
+    ]
+    t = BetfairPaperTrader(cfg, FakeScanner(), assessor=None,
+                           two_stage=_twostage_returning(assessments),
+                           governor=g, store=_store())
+    # floor disabled -> not rejected on favourite grounds (odds band still applies)
+    assert len(t._assess(_market())) == 2
+
+
+def test_deep_spacing_sleeps_when_recent(monkeypatch):
+    """If a deep assessment ran recently, the next one waits."""
+    import core.betfair_paper as bp
+    from core.betfair_paper import BetfairPaperTrader
+    class FakeScanner:
+        def scan(self): return []
+    cfg = {"risk": {}, "betfair_assessor": {"favourite_floor_fraction": 0.0,
+                                            "min_odds": 1.20, "max_odds": 21.0},
+           "paper": {"deep_min_interval_seconds": 20.0}}
+    g = _gov(daily_deep_assessment_budget=50)
+    t = BetfairPaperTrader(cfg, FakeScanner(), assessor=None,
+                           two_stage=_twostage_returning([_assessment(1, "A", 0.6, 0.5, 2.0)]),
+                           governor=g, store=_store())
+    slept = {}
+    monkeypatch.setattr(bp.time, "monotonic", lambda: 1000.0)
+    monkeypatch.setattr(bp.time, "sleep", lambda s: slept.setdefault("s", s))
+    t._last_deep_at = 995.0  # 5s ago, need 20s gap -> should sleep ~15s
+    t._assess(_market())
+    assert slept.get("s", 0) > 10
