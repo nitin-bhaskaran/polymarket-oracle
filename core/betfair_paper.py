@@ -56,6 +56,13 @@ class BetfairPaperTrader:
 
         bf = config.get("betfair_assessor", {})
         self.min_edge = bf.get("min_edge", 0.05)
+        # Sanity bounds that suppress phantom edges on near-certain markets:
+        # an implausibly large triage edge is treated as triage confusion, and
+        # bets are only placed when the side's odds sit in a tradeable band
+        # (not extreme longshots/near-locks).
+        self.max_triage_edge = bf.get("max_triage_edge", 0.40)
+        self.min_odds = bf.get("min_odds", 1.20)
+        self.max_odds = bf.get("max_odds", 21.0)
 
         paper = config.get("paper", {})
         self.passive_timeout_s = paper.get("passive_timeout_seconds", 1800)
@@ -99,6 +106,19 @@ class BetfairPaperTrader:
         if best_edge < self.two_stage.triage_edge:
             return []  # not worth a deep look
 
+        # Upper guard: an absurdly large triage edge means the cheap, no-info
+        # triage strongly disagrees with a market the exchange prices
+        # confidently — that's a sign the triage is confused (near-certain
+        # market, e.g. a 0.3%-priced "replaced by tomorrow" market), not a real
+        # opportunity. Don't burn deep budget chasing it.
+        if best_edge > self.max_triage_edge:
+            logger.info(
+                f"Triage edge {best_edge:.1%} on {market.market_id} exceeds sanity "
+                f"cap ({self.max_triage_edge:.0%}); treating as triage confusion, "
+                f"skipping deep assess. ({market.event_name} / {market.market_name})"
+            )
+            return []
+
         # Stage 2: deep web-search assessment, budget permitting.
         if not self.governor.can_deep_assess():
             logger.info(
@@ -111,7 +131,19 @@ class BetfairPaperTrader:
         logger.info(f"Triage flagged {market.market_id} (edge {best_edge:.1%}); deep-assessing")
         deep = self.two_stage.deep_assess(market)
         self.governor.record_deep_assessment()
+        # Drop assessments on extreme-priced runners: backing/laying a near-lock
+        # (very long or very short odds) is where phantom edges and poor fills
+        # concentrate, and Kelly on extreme odds is unreliable.
+        deep = [a for a in deep if self._odds_in_band(a)]
         return deep
+
+    def _odds_in_band(self, assessment) -> bool:
+        """True if the side's odds are within the tradeable band (not a near-lock)."""
+        side_odds = (assessment.best_back if assessment.recommended_side == BetSide.BACK
+                     else assessment.best_lay)
+        if not side_odds:
+            return False
+        return self.min_odds <= side_odds <= self.max_odds
 
     # ── one cycle ──
 
@@ -203,6 +235,13 @@ class BetfairPaperTrader:
             bet = simulate_cross_fill(bet, market)
 
         self.store.add(bet)
+        logger.info(
+            f"PLACED paper {side.value} {assessment.runner_name} @ {bet.requested_odds} "
+            f"(filled={bet.filled_odds if bet.status == PaperBetStatus.FILLED else 'no'}, "
+            f"status={bet.status.value}, stake £{bet.stake:.2f}, liability £{bet.liability:.2f}, "
+            f"edge {assessment.edge:+.1%}, AI {assessment.estimated_probability:.0%} vs "
+            f"fair {assessment.market_fair_prob:.0%}) — {market.event_name} / {market.market_name}"
+        )
         if bet.status == PaperBetStatus.FILLED and self.alerts:
             self.alerts.send_message_sync(
                 f"📝 Paper {side.value} {assessment.runner_name} @ {bet.filled_odds} "

@@ -160,3 +160,71 @@ def _store():
     from core.paper_store import PaperBetStore
     tmp = tempfile.mkdtemp()
     return PaperBetStore(os.path.join(tmp, "bets.jsonl"))
+
+
+# ── triage-edge upper guard + extreme-odds bet filter ──
+
+def test_triage_confusion_cap_skips_deep():
+    """An absurd triage edge (near-certain market) is skipped, not deep-assessed."""
+    from core.betfair_paper import BetfairPaperTrader
+    from core.betfair_models import BetfairAssessment
+
+    class FakeTwoStage:
+        triage_edge = 0.04
+        def triage(self, market):
+            a = BetfairAssessment(market_id=market.market_id, selection_id=1,
+                                  runner_name="Yes", question="?",
+                                  estimated_probability=0.84, confidence=0.5,
+                                  market_fair_prob=0.003)
+            a.calculate_edge()
+            return 0.84, [a]  # 84% triage edge = confusion
+        def deep_assess(self, market):
+            raise AssertionError("should not deep-assess a triage-confused market")
+
+    class FakeScanner:
+        def scan(self): return []
+    cfg = {"risk": {}, "betfair_assessor": {"max_triage_edge": 0.40}, "paper": {}}
+    g = _gov(daily_deep_assessment_budget=50)
+    t = BetfairPaperTrader(cfg, FakeScanner(), assessor=None,
+                           two_stage=FakeTwoStage(), governor=g, store=_store())
+    assert t._assess(_market()) == []
+
+
+def test_extreme_odds_assessments_filtered():
+    """Deep assessments on near-lock / longshot odds are dropped before placement."""
+    from core.betfair_paper import BetfairPaperTrader
+    from core.betfair_models import BetfairAssessment, BetSide
+
+    class FakeTwoStage:
+        triage_edge = 0.04
+        def triage(self, market):
+            a = BetfairAssessment(market_id=market.market_id, selection_id=1,
+                                  runner_name="A", question="?",
+                                  estimated_probability=0.6, confidence=0.7,
+                                  market_fair_prob=0.5)
+            a.calculate_edge()
+            return 0.10, [a]
+        def deep_assess(self, market):
+            # Two assessments: one tradeable (odds 2.0), one near-lock (odds 1.05)
+            good = BetfairAssessment(market_id=market.market_id, selection_id=1,
+                                     runner_name="A", question="?",
+                                     estimated_probability=0.6, confidence=0.7,
+                                     market_fair_prob=0.5, best_back=2.0)
+            good.calculate_edge()
+            lock = BetfairAssessment(market_id=market.market_id, selection_id=2,
+                                     runner_name="B", question="?",
+                                     estimated_probability=0.99, confidence=0.7,
+                                     market_fair_prob=0.95, best_back=1.05)
+            lock.calculate_edge()
+            return [good, lock]
+
+    class FakeScanner:
+        def scan(self): return []
+    cfg = {"risk": {}, "betfair_assessor": {"min_odds": 1.20, "max_odds": 21.0}, "paper": {}}
+    g = _gov(daily_deep_assessment_budget=50)
+    t = BetfairPaperTrader(cfg, FakeScanner(), assessor=None,
+                           two_stage=FakeTwoStage(), governor=g, store=_store())
+    res = t._assess(_market())
+    # Only the tradeable-odds assessment survives
+    assert len(res) == 1
+    assert res[0].best_back == 2.0
