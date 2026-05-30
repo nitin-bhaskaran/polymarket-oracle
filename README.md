@@ -1,6 +1,6 @@
 # Polymarket Oracle 🔮
 
-Autonomous prediction market trading bot for [Polymarket](https://polymarket.com). Uses AI-driven probability assessment to identify mispriced markets and execute trades automatically.
+Autonomous prediction market trading bot for [Polymarket](https://polymarket.com). Uses AI-driven probability assessment to identify mispriced markets and execute trades automatically..
 
 ## Architecture
 
