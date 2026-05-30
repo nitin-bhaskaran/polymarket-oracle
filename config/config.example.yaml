@@ -148,3 +148,57 @@ logging:
   file: "logs/oracle.log"
   max_size_mb: 50
   backup_count: 5
+
+# ─────────────────────────────────────────────────────────────────────
+# BETFAIR EXCHANGE (UK-legal pivot — validate on the free DELAYED app key)
+# ─────────────────────────────────────────────────────────────────────
+betfair:
+  # From the Betfair API demo tool (createDeveloperAppKeys / getDeveloperAppKeys).
+  # Use the DELAYED key (version 1.0-Delay) for validation. Live key needs the
+  # £499 activation and is only worth it once paper results prove out.
+  app_key: "YOUR_BETFAIR_DELAYED_APP_KEY"
+  username: "YOUR_BETFAIR_USERNAME"
+  password: "YOUR_BETFAIR_PASSWORD"
+  locale: "en"
+  currency: "GBP"
+
+# Betfair scanner scope (overrides the Polymarket scanner block above when
+# running the Betfair path). All sports + politics, pre-event by default.
+betfair_scanner:
+  event_type_ids: []          # empty = ALL event types incl. politics; e.g. [1, 2378961] = Soccer + Politics
+  market_type_codes: []       # empty = ALL market types (keeps politics/specials, not just MATCH_ODDS)
+  in_play_enabled: false      # exclude in-play entirely (slow loop can't compete live)
+  max_markets_per_scan: 20
+  catalogue_fetch: 200
+  book_batch_size: 10         # markets per listMarketBook call (Betfair weight cap)
+  min_total_matched: 1000.0   # £ matched liquidity floor
+  min_overround: 0.85         # OVERROUND SANITY: drop markets below this (not a real win-market)
+  max_overround: 1.20         # ...or above this (handicaps/lines/totals, ultra-thin specials)
+  max_hours_ahead: 168.0      # catalogue look-ahead floor (resolution horizon may widen it)
+  min_hours_ahead: 3.0        # PRE-EVENT BUFFER: skip anything starting within 3h (avoids near-live state)
+  max_resolution_days: 30.0   # RESOLUTION HORIZON: skip markets resolving >30d out (unvalidatable in-window, e.g. 2028/29 politics)
+  commission_rate: 0.05       # your Betfair commission rate (market base rate)
+
+# Paper-trading orchestrator (Betfair validation instrument)
+paper:
+  store_path: "data/paper_bets.jsonl"
+  governor_state_path: "data/governor.json"
+  passive_timeout_seconds: 1800   # resting in-play limit orders expire after this
+  max_bets_per_cycle: 5
+  # Cost governor
+  daily_deep_assessment_budget: 50   # hard cap on web-search assessments/day (~$10/day)
+  reassess_after_hours: 6.0          # re-assess a cached market only after this long
+  reassess_on_move: 0.05             # ...or if odds moved >= 5% on a runner
+  scan_interval: 1800                # 30-min cycle (pre-event markets move slowly)
+
+# Per-runner assessment edge threshold for Betfair
+betfair_assessor:
+  min_edge: 0.05                  # actionable edge after deep assessment
+  normalise_probabilities: false
+  max_runners_per_market: 8
+  # Two-stage cost control: cheap triage model + expensive deep model w/ web search
+  triage_model: "claude-haiku-4-5-20251001"
+  deep_model: "claude-sonnet-4-6"
+  triage_edge: 0.04               # promote to deep web-search assess if rough edge >= this
+  web_search_max_uses: 3          # max web searches per deep assessment
+  deep_max_tokens: 4000           # bigger budget so search narration + JSON both fit
