@@ -175,17 +175,27 @@ class BetfairClient:
                          price_data: Optional[list] = None) -> list[dict]:
         """
         Get live (delayed, on the delayed key) prices/state for markets.
-        price_data e.g. ["EX_BEST_OFFERS"] for best back/lay, ["EX_ALL_OFFERS"]
-        for full depth, ["EX_TRADED"] for traded volume/last price.
+
+        Betfair weights each listMarketBook request; requesting rich price data
+        across many markets trips TOO_MUCH_DATA. We therefore request only
+        EX_BEST_OFFERS by default, cap best-offers depth to 1 rung (the touch),
+        and rely on small batches (see scanner). EX_TRADED is omitted by default
+        because it adds significant weight and we don't need traded ladders for
+        pre-event value assessment.
         """
         if price_data is None:
-            price_data = ["EX_BEST_OFFERS", "EX_TRADED"]
+            price_data = ["EX_BEST_OFFERS"]
         return self._rpc(
             "SportsAPING/v1.0/listMarketBook",
             {
                 "marketIds": market_ids,
                 "priceProjection": {
                     "priceData": price_data,
+                    "exBestOffersOverrides": {
+                        "bestPricesDepth": 1,
+                        "rollupModel": "STAKE",
+                        "rollupLimit": 0,
+                    },
                     "virtualise": True,
                 },
                 "currencyCode": self.currency,

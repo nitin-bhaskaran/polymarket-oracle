@@ -38,6 +38,7 @@ class BetfairScanner:
         self.in_play_enabled = sc.get("in_play_enabled", False)
         self.max_markets = sc.get("max_markets_per_scan", 20)
         self.catalogue_fetch = sc.get("catalogue_fetch", 200)
+        self.book_batch_size = sc.get("book_batch_size", 10)
         self.min_total_matched = sc.get("min_total_matched", 1000.0)
         # Pre-event lookahead window (hours). Markets starting beyond this are
         # ignored as too far out to assess usefully.
@@ -81,13 +82,19 @@ class BetfairScanner:
         if not catalogue:
             return []
 
-        # Map id -> catalogue entry for name merging
+        # Map id -> catalogue entry for name merging. The catalogue is sorted by
+        # MAXIMUM_TRADED (most liquid first); we only need books for the top
+        # slice we'll actually consider, not all of catalogue_fetch — fetching
+        # books for 200 markets is slow and unnecessary.
         cat_by_id = {c["marketId"]: c for c in catalogue if "marketId" in c}
-        market_ids = list(cat_by_id.keys())
+        book_limit = max(self.max_markets * 3, self.book_batch_size)
+        market_ids = list(cat_by_id.keys())[:book_limit]
 
-        # 2. Fetch books in batches (Betfair caps marketIds per call ~ a few dozen)
+        # 2. Fetch books in batches. Betfair weights listMarketBook by data
+        # requested; even best-offers trips TOO_MUCH_DATA above ~10 markets, so
+        # batch small. Configurable via scanner.book_batch_size.
         books: dict[str, dict] = {}
-        BATCH = 25
+        BATCH = self.book_batch_size
         for i in range(0, len(market_ids), BATCH):
             chunk = market_ids[i:i + BATCH]
             try:

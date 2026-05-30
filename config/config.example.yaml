@@ -169,6 +169,7 @@ betfair_scanner:
   in_play_enabled: true       # paper-validation: include in-play (honest fills make it pessimistic-but-real)
   max_markets_per_scan: 20
   catalogue_fetch: 200
+  book_batch_size: 10        # markets per listMarketBook call (Betfair weight cap)
   min_total_matched: 1000.0   # £ matched liquidity floor
   max_hours_ahead: 72.0       # ignore markets starting further out than this
   min_minutes_ahead: 5.0      # skip markets about to start / just gone live
