@@ -165,14 +165,15 @@ betfair:
 # Betfair scanner scope (overrides the Polymarket scanner block above when
 # running the Betfair path). All sports + politics, pre-event by default.
 betfair_scanner:
-  event_type_ids: []          # empty = all sports + politics; e.g. [1, 2378961] = Soccer + Politics
-  in_play_enabled: true       # paper-validation: include in-play (honest fills make it pessimistic-but-real)
+  event_type_ids: []          # empty = ALL event types incl. politics; e.g. [1, 2378961] = Soccer + Politics
+  market_type_codes: []       # empty = ALL market types (keeps politics/specials, not just MATCH_ODDS)
+  in_play_enabled: false      # exclude in-play entirely (slow loop can't compete live)
   max_markets_per_scan: 20
   catalogue_fetch: 200
-  book_batch_size: 10        # markets per listMarketBook call (Betfair weight cap)
+  book_batch_size: 10         # markets per listMarketBook call (Betfair weight cap)
   min_total_matched: 1000.0   # £ matched liquidity floor
-  max_hours_ahead: 72.0       # ignore markets starting further out than this
-  min_minutes_ahead: 5.0      # skip markets about to start / just gone live
+  max_hours_ahead: 168.0      # look up to a week out (captures more pre-event politics/outrights)
+  min_hours_ahead: 3.0        # PRE-EVENT BUFFER: skip anything starting within 3h (avoids near-live state)
   commission_rate: 0.05       # your Betfair commission rate (market base rate)
 
 # Paper-trading orchestrator (Betfair validation instrument)

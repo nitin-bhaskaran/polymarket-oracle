@@ -43,8 +43,15 @@ class BetfairScanner:
         # Pre-event lookahead window (hours). Markets starting beyond this are
         # ignored as too far out to assess usefully.
         self.max_hours_ahead = sc.get("max_hours_ahead", 72.0)
+        # Pre-event buffer: skip anything starting within this many hours, so the
+        # model always assesses a stable, searchable pre-event state (not a
+        # near-live or in-play market where its information is stale).
+        self.min_hours_ahead = sc.get("min_hours_ahead", 3.0)
+        # Market type codes to include. Empty list = all types (lets political
+        # and novelty markets through, which don't use MATCH_ODDS). Default
+        # covers the main sports win-markets plus common outright codes.
+        self.market_type_codes = sc.get("market_type_codes", [])
         # Skip markets starting within this many minutes (too close / going live).
-        self.min_minutes_ahead = sc.get("min_minutes_ahead", 5.0)
         self.default_commission = sc.get("commission_rate", 0.05)
 
         self._market_cache: dict[str, BetfairMarket] = {}
@@ -62,8 +69,11 @@ class BetfairScanner:
                 "from": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "to": (now + timedelta(hours=self.max_hours_ahead)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             },
-            "marketTypeCodes": ["MATCH_ODDS", "MONEY_LINE", "WINNER", "OUTRIGHT"],
         }
+        # Only constrain market types if configured; empty = all types (so
+        # politics/specials aren't filtered out).
+        if self.market_type_codes:
+            market_filter["marketTypeCodes"] = self.market_type_codes
         if self.event_type_ids:
             market_filter["eventTypeIds"] = [str(e) for e in self.event_type_ids]
         if not self.in_play_enabled:
@@ -118,8 +128,7 @@ class BetfairScanner:
             if not self.in_play_enabled and market.in_play:
                 continue
             if market.phase == MarketPhase.PRE_EVENT:
-                mins = market.hours_to_start * 60.0
-                if mins < self.min_minutes_ahead:
+                if market.hours_to_start < self.min_hours_ahead:
                     continue
             markets.append(market)
 
