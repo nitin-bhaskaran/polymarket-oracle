@@ -79,6 +79,53 @@ def _calibration(bets: list[PaperBet], buckets=10) -> str:
     return "\n".join(lines)
 
 
+def _equity_curve(bets: list[PaperBet], bankroll: float = 100.0) -> str:
+    """
+    Reframe settled bets as what they'd have done to a £`bankroll` starting
+    pot, two ways:
+      1. PROPORTIONAL: scale the bot's actual stakes so total risked equals the
+         bankroll — answers "if I'd put £100 of risk through these bets".
+      2. FLAT-STAKE: equal fixed stake per bet, ignoring Kelly sizing — answers
+         "if I'd just backed each signal evenly".
+    """
+    settled = [b for b in bets if b.status == PaperBetStatus.SETTLED]
+    if not settled:
+        return "  (no settled bets yet)"
+
+    settled.sort(key=lambda b: (b.settled_at or b.placed_at))
+
+    total_risk = sum(b.liability for b in settled) or 1.0
+    total_net = sum((b.net_pnl or 0.0) for b in settled)
+    prop_pnl = total_net / total_risk * bankroll
+
+    n = len(settled)
+    flat_stake = bankroll / n
+    flat_pnl = 0.0
+    for b in settled:
+        if b.filled_odds is None or b.net_pnl is None:
+            continue
+        actual_stake = b.stake or 0.0
+        if actual_stake > 0:
+            flat_pnl += b.net_pnl * (flat_stake / actual_stake)
+
+    lines = [
+        f"  Starting bankroll: £{bankroll:.2f}  over {n} settled bets",
+        f"  (1) Proportional-to-risk: net £{prop_pnl:+.2f}  ->  £{bankroll+prop_pnl:.2f}  ({prop_pnl/bankroll*100:+.1f}%)",
+        f"  (2) Flat-stake (£{flat_stake:.2f}/bet):  net £{flat_pnl:+.2f}  ->  £{bankroll+flat_pnl:.2f}  ({flat_pnl/bankroll*100:+.1f}%)",
+    ]
+
+    running = bankroll
+    path = [bankroll]
+    for b in settled:
+        if b.net_pnl is not None and total_risk > 0:
+            running += b.net_pnl / total_risk * bankroll
+            path.append(running)
+    lo, hi = min(path), max(path)
+    lines.append(f"  Equity path (proportional): low £{lo:.2f}, high £{hi:.2f}, now £{path[-1]:.2f}")
+    lines.append("  NOTE: at small n this is noise — illustration, not expectation.")
+    return "\n".join(lines)
+
+
 def analyse(path: str, min_n: int = 10):
     store = PaperBetStore(path)
     bets = store.all()
@@ -97,6 +144,9 @@ def analyse(path: str, min_n: int = 10):
     print()
     print("CALIBRATION (overall):")
     print(_calibration(bets))
+    print()
+    print("£100 BANKROLL SIMULATION:")
+    print(_equity_curve(bets, bankroll=100.0))
     print()
 
     dimensions = {
