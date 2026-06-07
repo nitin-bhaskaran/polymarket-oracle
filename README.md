@@ -2,6 +2,10 @@
 
 Autonomous prediction market trading bot for [Polymarket](https://polymarket.com). Uses AI-driven probability assessment to identify mispriced markets and execute trades automatically..
 
+> **Running the Betfair paper loop?** See [`RUNBOOK.md`](./RUNBOOK.md) for the
+> start / stop / check-results steps (and the pre-flight checklist: config sync,
+> VPN-off, sleep-disabled).
+
 ## Architecture
 
 ```
