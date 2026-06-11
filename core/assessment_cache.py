@@ -11,11 +11,10 @@ Two jobs:
        the assessed runner since last time.
    A market that never moves is paid for once, ever.
 
-2. Hard daily budget cap on EXPENSIVE (web-search) assessments. A counter,
-   reset at UTC midnight, that the orchestrator checks before spending. When
-   the cap is hit, scanning/monitoring/settlement continue but no new deep
-   assessments are run until tomorrow. This is an in-code backstop independent
-   of the Anthropic-side spend cap.
+2. Daily caps on all grounded assessments and, separately, paid Anthropic deep
+   calls. Both reset at UTC midnight. The paid cap prevents a missing key,
+   free-tier quota limit, or transient Gemini failure from silently turning
+   every assessment into a Sonnet call.
 
 Persisted to disk so restarts don't reset the budget or lose the cache.
 """
@@ -35,12 +34,16 @@ class AssessmentGovernor:
         self.reassess_after_hours = paper.get("reassess_after_hours", 6.0)
         self.reassess_on_move = paper.get("reassess_on_move", 0.05)  # 5% odds move
         self.daily_deep_budget = paper.get("daily_deep_assessment_budget", 50)
+        self.daily_paid_deep_budget = paper.get(
+            "daily_paid_deep_assessment_budget", 5
+        )
         self.state_path = Path(paper.get("governor_state_path", "data/governor.json"))
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
 
         # market_id -> {"assessed_at": iso, "odds": {selection_id: odds}}
         self._cache: dict = {}
         self._deep_today = 0
+        self._paid_deep_today = 0
         self._day = self._today()
         self._load()
 
@@ -55,10 +58,12 @@ class AssessmentGovernor:
             data = json.loads(self.state_path.read_text())
             self._cache = data.get("cache", {})
             self._deep_today = data.get("deep_today", 0)
+            self._paid_deep_today = data.get("paid_deep_today", 0)
             self._day = data.get("day", self._today())
             # Reset counter if the saved day is stale.
             if self._day != self._today():
                 self._deep_today = 0
+                self._paid_deep_today = 0
                 self._day = self._today()
         except Exception as e:
             logger.warning(f"Failed to load governor state: {e}")
@@ -68,6 +73,7 @@ class AssessmentGovernor:
             self.state_path.write_text(json.dumps({
                 "cache": self._cache,
                 "deep_today": self._deep_today,
+                "paid_deep_today": self._paid_deep_today,
                 "day": self._day,
             }, indent=2))
         except Exception as e:
@@ -79,6 +85,7 @@ class AssessmentGovernor:
             logger.info(f"New day {today}: resetting deep-assessment budget "
                         f"(used {self._deep_today} yesterday)")
             self._deep_today = 0
+            self._paid_deep_today = 0
             self._day = today
             self._flush()
 
@@ -94,6 +101,18 @@ class AssessmentGovernor:
     def record_deep_assessment(self):
         self._roll_day_if_needed()
         self._deep_today += 1
+        self._flush()
+
+    def paid_deep_budget_remaining(self) -> int:
+        self._roll_day_if_needed()
+        return max(0, self.daily_paid_deep_budget - self._paid_deep_today)
+
+    def can_paid_deep_assess(self) -> bool:
+        return self.paid_deep_budget_remaining() > 0
+
+    def record_paid_deep_assessment(self):
+        self._roll_day_if_needed()
+        self._paid_deep_today += 1
         self._flush()
 
     # ── change-triggered re-assessment ──

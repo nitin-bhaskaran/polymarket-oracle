@@ -53,6 +53,23 @@ def test_budget_persists_across_instances():
     assert g2.deep_budget_remaining() == 4
 
 
+def test_paid_deep_budget_is_separate_and_persists():
+    tmp = tempfile.mkdtemp()
+    path = os.path.join(tmp, "gov.json")
+    cfg = {"paper": {
+        "governor_state_path": path,
+        "daily_deep_assessment_budget": 50,
+        "daily_paid_deep_assessment_budget": 1,
+    }}
+    g1 = AssessmentGovernor(cfg)
+    assert g1.can_paid_deep_assess()
+    g1.record_paid_deep_assessment()
+    assert not g1.can_paid_deep_assess()
+    assert g1.deep_budget_remaining() == 50
+    g2 = AssessmentGovernor(cfg)
+    assert g2.paid_deep_budget_remaining() == 0
+
+
 # ── change-triggered reassessment ──
 
 def test_new_market_needs_assessment():

@@ -94,7 +94,9 @@ class _Assessor:
         a = BetfairAssessment(market_id=market.market_id, selection_id=1, runner_name="A",
                               question="?", estimated_probability=self.prob, confidence=0.8,
                               market_fair_prob=market.fair_implied_prob(market.runners[0]),
-                              best_back=2.0, best_lay=2.04, commission_rate=0.05)
+                              best_back=2.0, best_lay=2.04, commission_rate=0.05,
+                              assessment_provider="gemini",
+                              assessment_model="gemini-2.5-flash")
         a.calculate_edge()
         return [a]
 
@@ -117,6 +119,8 @@ def test_cycle_places_and_fills_preevent_back():
     assert bet.side == BetSide.BACK
     assert bet.style == OrderStyle.CROSS
     assert bet.status == PaperBetStatus.FILLED
+    assert bet.assessment_provider == "gemini"
+    assert bet.assessment_model == "gemini-2.5-flash"
 
 
 def test_cycle_no_bet_when_edge_below_threshold():

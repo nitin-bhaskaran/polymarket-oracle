@@ -31,7 +31,7 @@ Autonomous prediction market trading bot for [Polymarket](https://polymarket.com
 ### Prerequisites
 - Python 3.11+
 - Polymarket account with USDC on Polygon
-- Anthropic API key (for probability assessment)
+- Gemini and/or Anthropic API key (for probability assessment)
 - Telegram bot token (for alerts)
 
 ### Setup
@@ -96,6 +96,7 @@ Key settings:
 - `polymarket.funder_address`: Your Polymarket proxy wallet address
 - `polymarket.clob_api_*`: Optional pre-created CLOB V2 API credentials
 - `anthropic.api_key`: For AI probability assessment
+- `gemini.api_key`: Optional cheap-first assessment key (or set `GEMINI_API_KEY`)
 - `news.enabled`: Whether to enrich assessments with public news context
 - `telegram.bot_token`: For trade alerts
 - `telegram.chat_id`: Your Telegram user ID
@@ -198,6 +199,23 @@ The default configuration includes:
 Existing paper records remain tagged `legacy`; new records include domain,
 competition, event, market type, sleeve, and strategy attribution. The paper
 analysis compares AI Brier score directly with the Betfair market baseline.
+
+### Assessment cost routing
+
+The Betfair assessor tries providers in `betfair_assessor.provider_order`.
+The default is Gemini first and Anthropic second. With `GEMINI_API_KEY` set,
+Gemini Flash-Lite handles no-search triage and Gemini Flash handles grounded
+deep assessments. Anthropic Haiku/Sonnet is used automatically if Gemini is
+unconfigured, rate-limited, or returns unusable output.
+
+`paper.daily_paid_deep_assessment_budget` separately caps Sonnet fallbacks
+(default: 5/day), so a free-tier outage cannot silently produce an open-ended
+Anthropic bill. Remove `anthropic` from `provider_order` for strict mode with
+no paid fallback.
+
+Every paper bet stores `assessment_provider` and `assessment_model`; run
+`python -m core.paper_analysis` to compare calibration and ROI by provider
+before deciding whether the cheaper route is good enough for live capital.
 
 ## License
 

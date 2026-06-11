@@ -197,6 +197,8 @@ class BetfairAssessment(BaseModel):
     edge: float = 0.0
     abs_edge: float = 0.0
     recommended_side: Optional[BetSide] = None
+    assessment_provider: str = ""
+    assessment_model: str = ""
 
     assessed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -276,6 +278,8 @@ class PaperBet(BaseModel):
     edge_band: str = ""        # e.g. "5-8%", "8-12%", ">12%"
     confidence_band: str = ""  # e.g. "low", "med", "high"
     strategy: str = "value"    # "value" | "fade_overreaction" | ...
+    assessment_provider: str = "legacy"
+    assessment_model: str = "legacy"
 
     placed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

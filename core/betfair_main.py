@@ -55,12 +55,15 @@ def setup_logging(config: dict):
 def _env_overrides(config: dict):
     bf = config.setdefault("betfair", {})
     ac = config.setdefault("anthropic", {})
+    gc = config.setdefault("gemini", {})
     tg = config.setdefault("telegram", {})
     mappings = [
         ("BETFAIR_APP_KEY", bf, "app_key"),
         ("BETFAIR_USERNAME", bf, "username"),
         ("BETFAIR_PASSWORD", bf, "password"),
         ("ANTHROPIC_API_KEY", ac, "api_key"),
+        ("GEMINI_API_KEY", gc, "api_key"),
+        ("GOOGLE_API_KEY", gc, "api_key"),
         ("TELEGRAM_BOT_TOKEN", tg, "bot_token"),
         ("TELEGRAM_CHAT_ID", tg, "chat_id"),
     ]

@@ -47,6 +47,15 @@ anthropic:
   max_retries: 3
   retry_base_delay_seconds: 2.0
 
+# Optional cheap-first assessment provider. Gemini's free tier can handle
+# triage and grounded web-search assessments; Anthropic remains the fallback.
+gemini:
+  api_key: ""
+  base_url: "https://generativelanguage.googleapis.com/v1beta"
+  triage_model: "gemini-2.5-flash-lite"
+  deep_model: "gemini-2.5-flash"
+  timeout_seconds: 45.0
+
 news:
   # GDELT's public document API has strict burst rate limits (429s under
   # concurrent assessment). Disabled by default — Claude's own knowledge is the
@@ -224,6 +233,7 @@ paper:
       max_open_bets_per_event: 3
   # Cost governor
   daily_deep_assessment_budget: 30   # hard cap on web-search assessments/day
+  daily_paid_deep_assessment_budget: 5  # subset allowed to fall back to Anthropic
   deep_min_interval_seconds: 20.0    # min gap between deep assessments (stay under tokens/min rate limit)
   reassess_after_hours: 12.0         # re-assess a cached market only after this long
   reassess_on_move: 0.10             # ...or if odds moved >= 10% on a runner
@@ -234,7 +244,11 @@ betfair_assessor:
   min_edge: 0.05                  # actionable edge after deep assessment
   normalise_probabilities: false
   max_runners_per_market: 8
-  # Two-stage cost control: cheap triage model + expensive deep model w/ web search
+  # Try the free/cheap grounded provider first, then fall back automatically.
+  provider_order:
+    - "gemini"
+    - "anthropic"
+  # Anthropic models used when Gemini is unconfigured, unavailable, or invalid.
   triage_model: "claude-haiku-4-5-20251001"
   deep_model: "claude-sonnet-4-6"
   triage_edge: 0.04               # promote to deep web-search assess if rough edge >= this

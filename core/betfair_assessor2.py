@@ -1,26 +1,13 @@
 """
-Two-stage Betfair assessor — cheap triage, then web-search deep dive.
+Two-stage Betfair assessor: cheap triage, then grounded deep assessment.
 
-Stage 1 (triage, cheap): a single coherent call per market on a cheap model
-(Haiku by default), NO web search, asking for a probability distribution over
-all runners that sums to 1. Produces a rough edge. Markets whose best rough
-edge clears triage_edge get promoted to stage 2. On an efficient exchange most
-markets don't clear it, so the expensive stage runs rarely.
+Both stages make one coherent call per market and estimate a probability
+distribution over all runners. Providers are tried in configured order.
+Gemini can handle cheap/free triage and Google Search-grounded assessment;
+Anthropic remains an automatic fallback.
 
-Stage 2 (deep, expensive): a single coherent call per market on a stronger
-model (Sonnet) WITH the web_search tool enabled, so the model gathers current
-form/news/injury context before estimating. Also returns a coherent
-distribution. Gated by the AssessmentGovernor's daily budget.
-
-Both stages make ONE call per market (all runners + current odds in the prompt),
-which fixes the "probabilities don't sum to 1" incoherence from the old
-per-runner approach AND cuts call volume ~Nx.
-
-Cost levers wired here:
-  - cheap triage filters out most markets before any web search
-  - coherent single call (not N calls)
-  - daily deep-assessment budget (via governor)
-  - model split: Haiku triage, Sonnet deep
+Provider and model are attached to every result so paper trading can compare
+calibration and ROI instead of assuming the cheaper route is equivalent.
 """
 
 import json
@@ -28,9 +15,10 @@ import logging
 from typing import Optional
 
 import anthropic
+import httpx
 
 from core.betfair_models import (
-    BetfairAssessment, BetfairMarket, BetSide, Runner, RunnerStatus,
+    BetfairAssessment, BetfairMarket, Runner, RunnerStatus,
 )
 
 logger = logging.getLogger("betfair.assessor2")
@@ -50,7 +38,7 @@ Be calibrated and honest about uncertainty.
 
 CRITICAL OUTPUT RULE: Keep any commentary to at most two short sentences. You MUST end \
 your response with the JSON object below and it must be complete. Do not write long \
-research summaries — put a brief justification inside the "reasoning" field, not before \
+research summaries; put a brief justification inside the "reasoning" field, not before \
 the JSON. The final thing in your reply must be:
 {"probabilities": {"<selection_id>": 0.XX, ...}, "confidence": 0.XX, "reasoning": "brief"}"""
 
@@ -58,84 +46,89 @@ the JSON. The final thing in your reply must be:
 class TwoStageAssessor:
     def __init__(self, config: dict):
         ac = config.get("anthropic", {})
+        gc = config.get("gemini", {})
         bf = config.get("betfair_assessor", {})
 
         self.triage_model = bf.get("triage_model", "claude-haiku-4-5-20251001")
-        self.deep_model = bf.get("deep_model", ac.get("model", "claude-sonnet-4-6"))
+        self.deep_model = bf.get(
+            "deep_model", ac.get("model", "claude-sonnet-4-6")
+        )
+        self.gemini_triage_model = gc.get(
+            "triage_model", "gemini-2.5-flash-lite"
+        )
+        self.gemini_deep_model = gc.get("deep_model", "gemini-2.5-flash")
+        self.gemini_api_key = gc.get("api_key", "")
+        self.gemini_base_url = gc.get(
+            "base_url", "https://generativelanguage.googleapis.com/v1beta"
+        ).rstrip("/")
+        self.gemini_timeout = gc.get("timeout_seconds", 45.0)
+
+        self.provider_order = bf.get("provider_order", ["anthropic"])
+        if isinstance(self.provider_order, str):
+            self.provider_order = [self.provider_order]
+
         self.max_tokens = ac.get("max_tokens", 1500)
-        # Web-search responses include the model's running commentary on search
-        # results BEFORE the answer; 1500 tokens gets consumed by narration on
-        # data-rich markets and the JSON never arrives. Give the deep call its
-        # own larger budget.
         self.deep_max_tokens = bf.get("deep_max_tokens", 4000)
-        self.triage_edge = bf.get("triage_edge", 0.04)   # promote to deep if rough edge >= this
-        self.min_edge = bf.get("min_edge", 0.05)         # actionable edge after deep
+        self.triage_edge = bf.get("triage_edge", 0.04)
+        self.min_edge = bf.get("min_edge", 0.05)
         self.web_search_max_uses = bf.get("web_search_max_uses", 3)
         self.max_runners = bf.get("max_runners_per_market", 8)
 
-        self.client = anthropic.Anthropic(api_key=ac.get("api_key", ""))
-
-    # ── helpers ──
+        self.anthropic_api_key = ac.get("api_key", "")
+        self.client = anthropic.Anthropic(api_key=self.anthropic_api_key)
+        self.allow_paid_deep_fallback = True
+        self.paid_deep_used = False
 
     @staticmethod
     def _extract_text(response) -> str:
         parts = []
         for block in (getattr(response, "content", None) or []):
-            t = getattr(block, "text", None)
-            if t:
-                parts.append(t)
+            text = getattr(block, "text", None)
+            if text:
+                parts.append(text)
         return "\n".join(parts).strip()
 
     @staticmethod
     def _all_json_objects(text: str) -> list[dict]:
-        """
-        Find ALL balanced top-level JSON objects in text (web-search responses
-        interleave narration with the answer, and the model may emit braces in
-        prose before the real JSON). Returns every parseable object, in order.
-        """
-        objs = []
+        """Return all balanced, parseable top-level JSON objects in text."""
+        objects = []
         i = 0
-        n = len(text)
-        while i < n:
+        while i < len(text):
             if text[i] != "{":
                 i += 1
                 continue
             depth = 0
-            in_str = False
-            esc = False
+            in_string = False
+            escaped = False
             j = i
-            while j < n:
-                ch = text[j]
-                if in_str:
-                    if esc:
-                        esc = False
-                    elif ch == "\\":
-                        esc = True
-                    elif ch == '"':
-                        in_str = False
+            while j < len(text):
+                char = text[j]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        in_string = False
                 else:
-                    if ch == '"':
-                        in_str = True
-                    elif ch == "{":
+                    if char == '"':
+                        in_string = True
+                    elif char == "{":
                         depth += 1
-                    elif ch == "}":
+                    elif char == "}":
                         depth -= 1
                         if depth == 0:
                             try:
-                                objs.append(json.loads(text[i:j + 1]))
+                                objects.append(json.loads(text[i:j + 1]))
                             except json.JSONDecodeError:
                                 pass
                             break
                 j += 1
             i = j + 1
-        return objs
+        return objects
 
     def _extract_json(self, text: str) -> Optional[dict]:
-        """
-        Extract the answer object. Prefer the LAST object that contains a
-        'probabilities' key (the model's final answer after any search
-        narration). Falls back to the last parseable object, then None.
-        """
+        """Prefer the final JSON object containing a probabilities field."""
         if not text:
             return None
         if text.startswith("```"):
@@ -146,147 +139,303 @@ class TwoStageAssessor:
                 lines = lines[:-1]
             text = "\n".join(lines)
 
-        objs = self._all_json_objects(text)
-        if not objs:
+        objects = self._all_json_objects(text)
+        if not objects:
             return None
-        for obj in reversed(objs):
+        for obj in reversed(objects):
             if isinstance(obj, dict) and "probabilities" in obj:
                 return obj
-        return objs[-1]  # last resort
+        return objects[-1]
 
     def _market_prompt(self, market: BetfairMarket, active: list[Runner]) -> str:
         lines = [
-            f"MARKET: {market.market_name} — {market.event_name}",
+            f"MARKET: {market.market_name} - {market.event_name}",
             f"COMPETITION: {market.competition}",
             f"SPORT/TYPE: {market.sport}",
             "RUNNERS (with current exchange best-back odds):",
         ]
-        for r in active:
-            lines.append(f"  - selection_id {r.selection_id}: {r.name} @ {r.best_back}")
+        for runner in active:
+            lines.append(
+                f"  - selection_id {runner.selection_id}: "
+                f"{runner.name} @ {runner.best_back}"
+            )
         from datetime import datetime, timezone
-        lines.append(f"TODAY: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%MZ')}")
-        lines.append("Estimate P(win) for each selection_id as a distribution summing to 1.0.")
+        lines.append(
+            f"TODAY: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%MZ')}"
+        )
+        lines.append(
+            "Estimate P(win) for each selection_id as a distribution summing to 1.0."
+        )
         return "\n".join(lines)
 
-    def _to_assessments(self, market, active, data) -> list[BetfairAssessment]:
-        probs = data.get("probabilities", {}) if data else {}
-        conf = float(data.get("confidence", 0.5)) if data else 0.5
+    def _to_assessments(
+        self, market, active, data, provider: str = "", model: str = ""
+    ) -> list[BetfairAssessment]:
+        probabilities = data.get("probabilities", {}) if data else {}
+        confidence = float(data.get("confidence", 0.5)) if data else 0.5
         reasoning = data.get("reasoning", "") if data else ""
-        out = []
-        for r in active:
-            p = probs.get(str(r.selection_id))
-            if p is None:
+        assessments = []
+        for runner in active:
+            probability = probabilities.get(str(runner.selection_id))
+            if probability is None:
                 continue
-            p = max(0.01, min(0.99, float(p)))
-            fair = market.fair_implied_prob(r)
+            probability = max(0.01, min(0.99, float(probability)))
+            fair = market.fair_implied_prob(runner)
             if fair is None:
                 continue
-            a = BetfairAssessment(
-                market_id=market.market_id, selection_id=r.selection_id,
-                runner_name=r.name, question=f"Will {r.name} win {market.market_name}?",
-                estimated_probability=p, confidence=max(0.0, min(1.0, conf)),
-                reasoning=reasoning, market_fair_prob=fair,
-                best_back=r.best_back, best_lay=r.best_lay,
+            assessment = BetfairAssessment(
+                market_id=market.market_id,
+                selection_id=runner.selection_id,
+                runner_name=runner.name,
+                question=f"Will {runner.name} win {market.market_name}?",
+                estimated_probability=probability,
+                confidence=max(0.0, min(1.0, confidence)),
+                reasoning=reasoning,
+                market_fair_prob=fair,
+                best_back=runner.best_back,
+                best_lay=runner.best_lay,
                 commission_rate=market.commission_rate,
+                assessment_provider=provider,
+                assessment_model=model,
             )
-            a.calculate_edge()
-            out.append(a)
-        return out
+            assessment.calculate_edge()
+            assessments.append(assessment)
+        return assessments
 
-    # ── stage 1: triage (cheap, no search) ──
+    @staticmethod
+    def _configured_key(value: str) -> bool:
+        return bool(value and not value.startswith("YOUR_"))
+
+    def _provider_available(self, provider: str) -> bool:
+        if provider == "gemini":
+            return self._configured_key(self.gemini_api_key)
+        if provider == "anthropic":
+            return self._configured_key(self.anthropic_api_key)
+        return False
+
+    def _gemini_call(
+        self, *, model: str, system: str, prompt: str, max_tokens: int,
+        grounded: bool,
+    ) -> tuple[str, int, object]:
+        body = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": max_tokens,
+            },
+        }
+        if grounded:
+            body["tools"] = [{"google_search": {}}]
+        else:
+            body["generationConfig"]["responseMimeType"] = "application/json"
+
+        response = httpx.post(
+            f"{self.gemini_base_url}/models/{model}:generateContent",
+            headers={
+                "x-goog-api-key": self.gemini_api_key,
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=self.gemini_timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        candidates = payload.get("candidates") or []
+        if not candidates:
+            raise ValueError("Gemini returned no candidates")
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text = "\n".join(
+            part.get("text", "") for part in parts if part.get("text")
+        ).strip()
+        grounding = candidates[0].get("groundingMetadata", {})
+        searches = len(grounding.get("webSearchQueries") or [])
+        return text, searches, payload
+
+    def _anthropic_call(
+        self, *, model: str, system: str, prompt: str, max_tokens: int,
+        grounded: bool,
+    ) -> tuple[str, int, object]:
+        kwargs = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if grounded:
+            kwargs["tools"] = [{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": self.web_search_max_uses,
+            }]
+        response = self.client.messages.create(**kwargs)
+        searches = sum(
+            1 for block in (getattr(response, "content", None) or [])
+            if getattr(block, "type", "") == "server_tool_use"
+        )
+        return self._extract_text(response), searches, response
+
+    def _call_stage(
+        self, *, stage: str, system: str, prompt: str, max_tokens: int,
+        grounded: bool,
+    ) -> tuple[Optional[dict], str, str, str, int, object]:
+        errors = []
+        last_result = ("", "", "", 0, None)
+        for configured_provider in self.provider_order:
+            provider = str(configured_provider).lower()
+            if not self._provider_available(provider):
+                continue
+            if provider == "gemini":
+                model = (
+                    self.gemini_triage_model if stage == "triage"
+                    else self.gemini_deep_model
+                )
+            elif provider == "anthropic":
+                if stage == "deep" and not self.allow_paid_deep_fallback:
+                    logger.info(
+                        "Skipping Anthropic deep fallback: daily paid budget exhausted"
+                    )
+                    continue
+                model = self.triage_model if stage == "triage" else self.deep_model
+            else:
+                logger.warning("Unknown assessment provider %r; skipping", provider)
+                continue
+
+            try:
+                if provider == "gemini":
+                    text, searches, raw_response = self._gemini_call(
+                        model=model,
+                        system=system,
+                        prompt=prompt,
+                        max_tokens=max_tokens,
+                        grounded=grounded,
+                    )
+                else:
+                    if stage == "deep":
+                        self.paid_deep_used = True
+                    text, searches, raw_response = self._anthropic_call(
+                        model=model,
+                        system=system,
+                        prompt=prompt,
+                        max_tokens=max_tokens,
+                        grounded=grounded,
+                    )
+                last_result = (provider, model, text, searches, raw_response)
+                data = self._extract_json(text)
+                if data and "probabilities" in data:
+                    return data, provider, model, text, searches, raw_response
+                errors.append(f"{provider}/{model}: no parseable probabilities")
+            except Exception as exc:
+                errors.append(f"{provider}/{model}: {exc}")
+                logger.warning(
+                    "%s assessment failed via %s/%s; trying fallback: %s",
+                    stage.capitalize(), provider, model, exc,
+                )
+
+        if errors:
+            logger.error(
+                "%s assessment exhausted providers: %s",
+                stage, "; ".join(errors),
+            )
+        else:
+            logger.error(
+                "%s assessment has no configured provider. Set GEMINI_API_KEY "
+                "or ANTHROPIC_API_KEY.",
+                stage,
+            )
+        provider, model, text, searches, raw_response = last_result
+        return None, provider, model, text, searches, raw_response
 
     def triage(self, market: BetfairMarket) -> tuple[float, list[BetfairAssessment]]:
         """Return (best_abs_edge, assessments) from a cheap no-search pass."""
-        active = [r for r in market.runners
-                  if r.status == RunnerStatus.ACTIVE and r.best_back][:self.max_runners]
+        active = [
+            runner for runner in market.runners
+            if runner.status == RunnerStatus.ACTIVE and runner.best_back
+        ][:self.max_runners]
         if not active:
             return 0.0, []
-        try:
-            resp = self.client.messages.create(
-                model=self.triage_model, max_tokens=self.max_tokens,
-                system=TRIAGE_SYSTEM,
-                messages=[{"role": "user", "content": self._market_prompt(market, active)}],
-            )
-            data = self._extract_json(self._extract_text(resp))
-        except Exception as e:
-            logger.warning(f"Triage failed for {market.market_id}: {e}")
+
+        data, provider, model, _, _, _ = self._call_stage(
+            stage="triage",
+            system=TRIAGE_SYSTEM,
+            prompt=self._market_prompt(market, active),
+            max_tokens=self.max_tokens,
+            grounded=False,
+        )
+        if not data:
             return 0.0, []
-        assessments = self._to_assessments(market, active, data)
-        best = max((a.abs_edge for a in assessments), default=0.0)
+        assessments = self._to_assessments(
+            market, active, data, provider=provider, model=model
+        )
+        best = max((assessment.abs_edge for assessment in assessments), default=0.0)
+        logger.info(
+            "Triage %s via %s/%s: best edge %.1f%%",
+            market.event_name, provider, model, best * 100,
+        )
         return best, assessments
 
-    # ── stage 2: deep (web search) ──
-
     def deep_assess(self, market: BetfairMarket) -> list[BetfairAssessment]:
-        active = [r for r in market.runners
-                  if r.status == RunnerStatus.ACTIVE and r.best_back][:self.max_runners]
+        self.paid_deep_used = False
+        active = [
+            runner for runner in market.runners
+            if runner.status == RunnerStatus.ACTIVE and runner.best_back
+        ][:self.max_runners]
         if not active:
             return []
-        try:
-            resp = self.client.messages.create(
-                model=self.deep_model, max_tokens=self.deep_max_tokens,
-                system=DEEP_SYSTEM,
-                tools=[{
-                    "type": "web_search_20250305",
-                    "name": "web_search",
-                    "max_uses": self.web_search_max_uses,
-                }],
-                messages=[{"role": "user", "content": self._market_prompt(market, active)}],
-            )
-        except Exception as e:
-            logger.error(f"Deep assess API call failed for {market.market_id} "
-                         f"({market.event_name}): {e}")
-            return []
 
-        # Count web searches actually performed (for cost visibility).
-        searches = sum(
-            1 for b in (getattr(resp, "content", None) or [])
-            if getattr(b, "type", "") == "server_tool_use"
+        data, provider, model, text, searches, raw_response = self._call_stage(
+            stage="deep",
+            system=DEEP_SYSTEM,
+            prompt=self._market_prompt(market, active),
+            max_tokens=self.deep_max_tokens,
+            grounded=True,
         )
-        stop = getattr(resp, "stop_reason", None)
-        text = self._extract_text(resp)
-        data = self._extract_json(text)
+        stop = getattr(raw_response, "stop_reason", None)
 
-        if (not data or "probabilities" not in data) and text:
-            # The model searched and narrated but didn't emit usable JSON (often
-            # because it hit max_tokens mid-prose). Salvage the work we paid for:
-            # a cheap, tool-free, JSON-only follow-up that converts its own
-            # findings into the structured answer. Much cheaper than re-searching.
-            logger.info(f"Deep assess {market.event_name}: no JSON (stop={stop}); "
-                        f"running salvage extraction call")
-            data = self._salvage_json(market, active, text)
+        if not data and text:
+            logger.info(
+                "Deep assess %s: no JSON (stop=%s); running salvage extraction call",
+                market.event_name, stop,
+            )
+            data, salvage_provider, salvage_model = self._salvage_json(
+                market, active, text
+            )
+            if data:
+                provider = f"{provider}+{salvage_provider}"
+                model = f"{model}+{salvage_model}"
 
         if not data or "probabilities" not in data:
             logger.error(
-                f"Deep assess for {market.market_id} ({market.event_name}) returned "
-                f"no parseable probabilities after {searches} search(es) "
-                f"(stop_reason={stop}). Response head: {text[:300]!r}"
+                "Deep assess for %s (%s) returned no parseable probabilities "
+                "after %s search(es) (stop_reason=%s). Response head: %r",
+                market.market_id, market.event_name, searches, stop, text[:300],
             )
             return []
-        logger.info(f"Deep assess {market.event_name}: {searches} search(es), parsed OK")
-        return self._to_assessments(market, active, data)
+
+        logger.info(
+            "Deep assess %s via %s/%s: %s search(es), parsed OK",
+            market.event_name, provider, model, searches,
+        )
+        return self._to_assessments(
+            market, active, data, provider=provider, model=model
+        )
 
     def _salvage_json(self, market, active, findings_text):
-        """
-        Convert a deep response's prose findings into the required JSON with a
-        cheap, tool-free follow-up call. Returns parsed dict or None.
-        """
-        ids = ", ".join(str(r.selection_id) for r in active)
+        """Convert a deep response's prose findings into the required JSON."""
+        ids = ", ".join(str(runner.selection_id) for runner in active)
         prompt = (
             "Below are research findings for a betting market. Convert them into "
-            "the required JSON ONLY — no other text.\n\n"
+            "the required JSON ONLY; no other text.\n\n"
             f"Selection IDs to include: {ids}\n\n"
             f"FINDINGS:\n{findings_text[:6000]}\n\n"
             'Reply with ONLY: {"probabilities": {"<selection_id>": 0.XX, ...}, '
-            '"confidence": 0.XX, "reasoning": "brief"} — probabilities must sum to 1.0.'
+            '"confidence": 0.XX, "reasoning": "brief"}; probabilities must sum to 1.0.'
         )
-        try:
-            resp = self.client.messages.create(
-                model=self.triage_model,  # cheap model is fine for reformatting
-                max_tokens=self.max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return self._extract_json(self._extract_text(resp))
-        except Exception as e:
-            logger.warning(f"Salvage extraction failed for {market.market_id}: {e}")
-            return None
+        data, provider, model, _, _, _ = self._call_stage(
+            stage="triage",
+            system="Convert supplied research into the requested JSON only.",
+            prompt=prompt,
+            max_tokens=self.max_tokens,
+            grounded=False,
+        )
+        return data, provider, model

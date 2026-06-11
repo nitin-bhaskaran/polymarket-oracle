@@ -29,22 +29,24 @@ Copy-Item config\config.example.yaml config\config.yaml -Force
 > placeholder credentials). If you have hand-edited `config.yaml`, edit the
 > values by hand instead of overwriting.
 
-**b. Confirm the cost-control values are present** (expect 5 lines):
+**b. Confirm the cost-control values are present** (expect 6 lines):
 
 ```powershell
-Select-String -Path config\config.yaml -Pattern "scan_interval|daily_deep_assessment_budget|web_search_max_uses|reassess_"
+Select-String -Path config\config.yaml -Pattern "scan_interval|daily_.*deep_assessment_budget|web_search_max_uses|reassess_"
 ```
 
 Expected:
-- `daily_deep_assessment_budget: 30`   (hard cost ceiling ≈ $3/day)
+- `daily_deep_assessment_budget: 50`   (all grounded calls; example config uses 30)
+- `daily_paid_deep_assessment_budget: 5` (hard cap on Anthropic deep fallbacks)
 - `web_search_max_uses: 2`             (main cost driver — keep low)
 - `reassess_after_hours: 12.0`
 - `reassess_on_move: 0.10`
 - `scan_interval: 2700`                (45-min cycle; a SINGLE line, no duplicate)
 
 **c. Credentials are in `.env`** (NOT committed). Required keys:
-`BETFAIR_APP_KEY`, `BETFAIR_USERNAME`, `BETFAIR_PASSWORD`,
-`ANTHROPIC_API_KEY`, and optionally `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`.
+`BETFAIR_APP_KEY`, `BETFAIR_USERNAME`, `BETFAIR_PASSWORD`, plus at least one
+of `GEMINI_API_KEY` (cheap-first, recommended) or `ANTHROPIC_API_KEY`
+(fallback). `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` remain optional.
 
 **d. VPN OFF.** Betfair geo-blocks non-UK IPs. If a VPN is routing you through
 another country you will get blanket `403 Forbidden` on login. Turn the VPN off
@@ -131,6 +133,8 @@ python -m core.betfair_main --list-politics  # list political markets
 
 ## 7. Cost control
 
-The hard ceiling is `daily_deep_assessment_budget` (≈ $0.10/deep assessment,
-so 30 ≈ $3/day). To spend less, lower it. Also set an account-level backstop in
-the Anthropic Console (Settings → Limits) in case config ever drifts again.
+`daily_deep_assessment_budget` caps total grounded-assessment throughput.
+`daily_paid_deep_assessment_budget` separately caps Anthropic deep fallbacks;
+set it to `0` or remove `anthropic` from `provider_order` for strict no-paid
+operation. Keep account-level spend limits in Google AI Studio / Google Cloud
+and the Anthropic Console as external backstops.

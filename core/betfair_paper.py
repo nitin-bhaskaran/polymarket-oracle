@@ -373,9 +373,15 @@ class BetfairPaperTrader:
         # input-tokens-per-minute rate limit (hard 429s that drop assessments).
         # A deliberate gap keeps us under the limit with clean, gap-free data.
         self._respect_deep_spacing()
+        if hasattr(self.two_stage, "allow_paid_deep_fallback"):
+            self.two_stage.allow_paid_deep_fallback = (
+                self.governor.can_paid_deep_assess()
+            )
         deep = self.two_stage.deep_assess(market)
         self._last_deep_at = time.monotonic()
         self.governor.record_deep_assessment()
+        if getattr(self.two_stage, "paid_deep_used", False):
+            self.governor.record_paid_deep_assessment()
 
         # Favourite-floor coherence check. On a multi-runner market, the clearest
         # distribution-construction failure is assigning the market's favourite an
@@ -615,6 +621,8 @@ class BetfairPaperTrader:
             edge_band=PaperBet.band_edge(assessment.abs_edge),
             confidence_band=PaperBet.band_confidence(assessment.confidence),
             strategy="llm_value",
+            assessment_provider=assessment.assessment_provider or "unknown",
+            assessment_model=assessment.assessment_model or "unknown",
         )
 
         # CROSS fills immediately against current depth; PASSIVE rests.
@@ -627,6 +635,7 @@ class BetfairPaperTrader:
             f"(filled={bet.filled_odds if bet.status == PaperBetStatus.FILLED else 'no'}, "
             f"status={bet.status.value}, stake £{bet.stake:.2f}, liability £{bet.liability:.2f}, "
             f"sleeve={bet.sleeve}, entry={bet.entry_index} ({bet.entry_reason}), "
+            f"model={bet.assessment_provider}/{bet.assessment_model}, "
             f"edge {assessment.edge:+.1%}, AI {assessment.estimated_probability:.0%} vs "
             f"fair {assessment.market_fair_prob:.0%}) — {market.event_name} / {market.market_name}"
         )

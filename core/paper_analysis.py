@@ -176,6 +176,8 @@ def analyse(path: str, min_n: int = 10):
         "edge_band": lambda b: b.edge_band,
         "confidence_band": lambda b: b.confidence_band,
         "strategy": lambda b: b.strategy,
+        "assessment_provider": lambda b: b.assessment_provider or "legacy",
+        "assessment_model": lambda b: b.assessment_model or "legacy",
     }
     for dim, keyfn in dimensions.items():
         groups = defaultdict(list)
