@@ -95,6 +95,15 @@ class PaperBetStore:
                 return True
         return False
 
+    def open_selection_bets(self, market_id: str,
+                            selection_id: int) -> list[PaperBet]:
+        """Open entries for one selection, ordered from oldest to newest."""
+        bets = [
+            b for b in self.open_bets()
+            if b.market_id == market_id and b.selection_id == selection_id
+        ]
+        return sorted(bets, key=lambda b: b.placed_at)
+
     def open_count(self, *, market_id: str = "", event_name: str = "",
                    sleeve: str = "") -> int:
         bets = self.open_bets()

@@ -76,7 +76,7 @@ python -m core.betfair_main --paper
 What a healthy run looks like:
 - `=== Paper cycle #N ===` lines advancing (~45 min apart)
 - `Cycle funnel:` showing how many markets were eligible, policy-blocked,
-  exposure-blocked, assessed, and placed
+  exposure-blocked, cached, assessed, scale-in-blocked, and placed
 - deep assessments showing `2 search(es)` (not 3)
 - `PLACED paper ...` lines when it places a bet
 - when the daily cap is hit: `Daily deep-assessment budget exhausted (30)`

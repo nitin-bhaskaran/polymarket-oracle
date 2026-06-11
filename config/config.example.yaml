@@ -188,7 +188,18 @@ paper:
   # Portfolio controls. Pending bets reserve exposure as well as filled bets.
   max_open_bets: 50
   max_total_exposure_pct: 75.0
-  max_open_bets_per_market: 1
+  max_open_bets_per_market: 5
+
+  # Controlled scale-ins. A repeated entry on the same selection is allowed
+  # only after a fresh material odds/edge improvement. Each later entry is
+  # smaller: 100%, 50%, then 25% of the fresh Kelly recommendation.
+  scale_in:
+    enabled: true
+    max_entries_per_selection: 3
+    min_hours_between_entries: 6.0
+    min_odds_improvement_pct: 0.03
+    min_edge_improvement: 0.02
+    size_multiplier: 0.50
 
   # Broad discovery remains enabled. Matching markets are routed into a sleeve
   # with their own market-type and exposure rules; everything else is general.
@@ -197,7 +208,7 @@ paper:
     max_exposure_pct: 60.0
     max_market_exposure_pct: 5.0
     max_event_exposure_pct: 10.0
-    max_open_bets_per_event: 2
+    max_open_bets_per_event: 5
   sleeves:
     - name: "fifa_world_cup"
       match_any:

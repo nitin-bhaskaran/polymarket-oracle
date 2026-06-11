@@ -90,6 +90,23 @@ class BetfairPaperTrader:
             "default_sleeve", {"name": "general"}
         )
         self.sleeves = paper.get("sleeves", [])
+        scale_in = paper.get("scale_in", {})
+        self.scale_in_enabled = scale_in.get("enabled", True)
+        self.max_entries_per_selection = scale_in.get(
+            "max_entries_per_selection", 3
+        )
+        self.scale_in_min_hours = scale_in.get(
+            "min_hours_between_entries", 6.0
+        )
+        self.scale_in_min_odds_improvement = scale_in.get(
+            "min_odds_improvement_pct", 0.03
+        )
+        self.scale_in_min_edge_improvement = scale_in.get(
+            "min_edge_improvement", 0.02
+        )
+        self.scale_in_size_multiplier = scale_in.get(
+            "size_multiplier", 0.5
+        )
 
     # ── capital accounting (paper) ──
 
@@ -228,6 +245,79 @@ class BetfairPaperTrader:
             return {"stake": 0.0, "liability": 0.0}
         return {"stake": stake, "liability": liability}
 
+    def _entry_decision(self, assessment) -> tuple[bool, int, str]:
+        """
+        Decide whether an assessment is a new position or a valid scale-in.
+
+        Repeated same-selection entries require a fresh material improvement:
+        better executable odds for our side or at least the configured increase
+        in assessed edge. This prevents periodic re-assessments from blindly
+        stacking identical exposure.
+        """
+        existing = self.store.open_selection_bets(
+            assessment.market_id, assessment.selection_id
+        )
+        if not existing:
+            return True, 1, "initial"
+        if not self.scale_in_enabled:
+            return False, len(existing) + 1, "scale-ins disabled"
+        if len(existing) >= self.max_entries_per_selection:
+            return False, len(existing) + 1, (
+                f"selection already has {len(existing)} entries; "
+                f"limit {self.max_entries_per_selection}"
+            )
+
+        latest = existing[-1]
+        if latest.side != assessment.recommended_side:
+            return False, len(existing) + 1, (
+                f"signal flipped from {latest.side.value} to "
+                f"{assessment.recommended_side.value}; not stacking opposing bets"
+            )
+
+        placed_at = latest.placed_at
+        if placed_at.tzinfo is None:
+            placed_at = placed_at.replace(tzinfo=timezone.utc)
+        age_hours = (
+            datetime.now(timezone.utc) - placed_at
+        ).total_seconds() / 3600
+        if age_hours < self.scale_in_min_hours:
+            return False, len(existing) + 1, (
+                f"last entry is {age_hours:.1f}h old; "
+                f"minimum {self.scale_in_min_hours:.1f}h"
+            )
+
+        odds = (
+            assessment.best_back
+            if assessment.recommended_side == BetSide.BACK
+            else assessment.best_lay
+        )
+        prior_odds = latest.filled_odds or latest.requested_odds
+        odds_improvement = 0.0
+        if odds and prior_odds:
+            if assessment.recommended_side == BetSide.BACK:
+                odds_improvement = (odds - prior_odds) / prior_odds
+            else:
+                odds_improvement = (prior_odds - odds) / prior_odds
+
+        edge_improvement = (
+            assessment.abs_edge - abs(latest.edge_at_placement)
+        )
+        if (
+            odds_improvement < self.scale_in_min_odds_improvement
+            and edge_improvement < self.scale_in_min_edge_improvement
+        ):
+            return False, len(existing) + 1, (
+                f"no material improvement: odds {odds_improvement:+.1%}, "
+                f"edge {edge_improvement:+.1%}"
+            )
+
+        reasons = []
+        if odds_improvement >= self.scale_in_min_odds_improvement:
+            reasons.append(f"odds improved {odds_improvement:+.1%}")
+        if edge_improvement >= self.scale_in_min_edge_improvement:
+            reasons.append(f"edge improved {edge_improvement:+.1%}")
+        return True, len(existing) + 1, "; ".join(reasons)
+
     # ── assessment routing (single-stage or two-stage + governor) ──
 
     def _assess(self, market):
@@ -355,10 +445,12 @@ class BetfairPaperTrader:
             "scanned": len(markets),
             "policy_blocked": 0,
             "exposure_blocked": 0,
+            "cached": 0,
             "eligible": 0,
+            "no_assessment_output": 0,
             "assessments": 0,
             "below_edge": 0,
-            "duplicate_selection": 0,
+            "scale_in_blocked": 0,
         }
         for market in markets:
             if placed >= self.max_bets_per_cycle:
@@ -382,7 +474,16 @@ class BetfairPaperTrader:
                 continue
 
             funnel["eligible"] += 1
+            if (
+                self.two_stage
+                and self.governor
+                and not self.governor.needs_assessment(market)
+            ):
+                funnel["cached"] += 1
+                continue
             assessments = self._assess(market)
+            if not assessments:
+                funnel["no_assessment_output"] += 1
             funnel["assessments"] += len(assessments)
             for a in assessments:
                 if placed >= self.max_bets_per_cycle:
@@ -390,10 +491,20 @@ class BetfairPaperTrader:
                 if a.abs_edge < self.min_edge:
                     funnel["below_edge"] += 1
                     continue
-                if self.store.has_open_position(a.market_id, a.selection_id):
-                    funnel["duplicate_selection"] += 1
+                allowed, entry_index, entry_reason = self._entry_decision(a)
+                if not allowed:
+                    funnel["scale_in_blocked"] += 1
+                    logger.info(
+                        f"Skipping entry on {a.runner_name} in "
+                        f"{market.event_name} / {market.market_name}: "
+                        f"{entry_reason}"
+                    )
                     continue
-                bet = self._place_paper_bet(market, a)
+                bet = self._place_paper_bet(
+                    market, a,
+                    entry_index=entry_index,
+                    entry_reason=entry_reason,
+                )
                 if bet:
                     placed += 1
 
@@ -410,15 +521,18 @@ class BetfairPaperTrader:
             f"eligible={funnel['eligible']} "
             f"policy_blocked={funnel['policy_blocked']} "
             f"exposure_blocked={funnel['exposure_blocked']} "
+            f"cached={funnel['cached']} "
+            f"no_assessment_output={funnel['no_assessment_output']} "
             f"assessments={funnel['assessments']} "
             f"below_edge={funnel['below_edge']} "
-            f"duplicate_selection={funnel['duplicate_selection']} "
+            f"scale_in_blocked={funnel['scale_in_blocked']} "
             f"placed={placed}"
         )
         logger.info(f"Paper cycle done. Placed {placed}. Status counts: {counts}")
         return placed
 
-    def _place_paper_bet(self, market, assessment):
+    def _place_paper_bet(self, market, assessment, entry_index: int = 1,
+                         entry_reason: str = "initial"):
         policy, policy_rejection = self._market_policy(market)
         sleeve = policy.get("name", "general")
         if policy_rejection:
@@ -463,6 +577,12 @@ class BetfairPaperTrader:
         )
         if sizing["stake"] <= 0:
             return None
+        if entry_index > 1:
+            multiplier = self.scale_in_size_multiplier ** (entry_index - 1)
+            sizing = {
+                "stake": sizing["stake"] * multiplier,
+                "liability": sizing["liability"] * multiplier,
+            }
         sizing = self._cap_sizing(sizing, odds, side, capacity)
         if sizing["stake"] <= 0:
             return None
@@ -490,6 +610,8 @@ class BetfairPaperTrader:
             market_name=market.market_name,
             competition=market.competition,
             sleeve=sleeve,
+            entry_index=entry_index,
+            entry_reason=entry_reason,
             edge_band=PaperBet.band_edge(assessment.abs_edge),
             confidence_band=PaperBet.band_confidence(assessment.confidence),
             strategy="llm_value",
@@ -504,7 +626,7 @@ class BetfairPaperTrader:
             f"PLACED paper {side.value} {assessment.runner_name} @ {bet.requested_odds} "
             f"(filled={bet.filled_odds if bet.status == PaperBetStatus.FILLED else 'no'}, "
             f"status={bet.status.value}, stake £{bet.stake:.2f}, liability £{bet.liability:.2f}, "
-            f"sleeve={bet.sleeve}, "
+            f"sleeve={bet.sleeve}, entry={bet.entry_index} ({bet.entry_reason}), "
             f"edge {assessment.edge:+.1%}, AI {assessment.estimated_probability:.0%} vs "
             f"fair {assessment.market_fair_prob:.0%}) — {market.event_name} / {market.market_name}"
         )

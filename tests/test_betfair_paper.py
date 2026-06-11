@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 from core.betfair_models import (
     BetfairAssessment, BetfairMarket, BetSide, MarketPhase, OrderStyle,
@@ -166,6 +167,111 @@ def test_no_duplicate_bet_same_selection():
     n1 = len(s.all())
     t.run_cycle()  # same market/selection still open -> no dupe
     assert len(s.all()) == n1
+
+
+def test_different_selection_in_same_market_is_allowed():
+    s = _store()
+    market = _market()
+    paper = {"max_open_bets_per_market": 3}
+    t = _trader(_Scanner(market), _Assessor(0.60), s, paper=paper)
+    assert t.run_cycle() == 1
+
+    second = BetfairAssessment(
+        market_id=market.market_id,
+        selection_id=2,
+        runner_name="B",
+        question="?",
+        estimated_probability=0.60,
+        confidence=0.8,
+        market_fair_prob=market.fair_implied_prob(market.runners[1]),
+        best_back=2.0,
+        best_lay=2.04,
+        commission_rate=0.05,
+    )
+    second.calculate_edge()
+    allowed, entry_index, reason = t._entry_decision(second)
+    assert allowed is True
+    assert entry_index == 1
+    assert reason == "initial"
+    assert t._place_paper_bet(
+        market, second, entry_index=entry_index, entry_reason=reason
+    ) is not None
+    assert len(s.all()) == 2
+
+
+def test_same_selection_scale_in_requires_material_improvement():
+    s = _store()
+    market = _market()
+    paper = {
+        "max_open_bets_per_market": 3,
+        "scale_in": {
+            "enabled": True,
+            "max_entries_per_selection": 3,
+            "min_hours_between_entries": 0,
+            "min_odds_improvement_pct": 0.03,
+            "min_edge_improvement": 0.02,
+        },
+    }
+    t = _trader(_Scanner(market), _Assessor(0.60), s, paper=paper)
+    assert t.run_cycle() == 1
+
+    unchanged = _Assessor(0.60).assess_market(market)[0]
+    allowed, entry_index, reason = t._entry_decision(unchanged)
+    assert allowed is False
+    assert entry_index == 2
+    assert "no material improvement" in reason
+
+
+def test_improved_scale_in_is_smaller_and_tagged():
+    s = _store()
+    market = _market()
+    paper = {
+        "max_open_bets_per_market": 3,
+        "scale_in": {
+            "enabled": True,
+            "max_entries_per_selection": 3,
+            "min_hours_between_entries": 6,
+            "min_odds_improvement_pct": 0.03,
+            "min_edge_improvement": 0.02,
+            "size_multiplier": 0.5,
+        },
+    }
+    t = _trader(_Scanner(market), _Assessor(0.60), s, paper=paper)
+    assert t.run_cycle() == 1
+    first = s.all()[0]
+    first.placed_at = datetime.now(timezone.utc) - timedelta(hours=7)
+
+    market.runners[0].available_to_back = [
+        PriceLevel(price=2.20, size=500)
+    ]
+    improved = BetfairAssessment(
+        market_id=market.market_id,
+        selection_id=1,
+        runner_name="A",
+        question="?",
+        estimated_probability=0.60,
+        confidence=0.8,
+        market_fair_prob=0.50,
+        best_back=2.20,
+        best_lay=2.24,
+        commission_rate=0.05,
+    )
+    improved.calculate_edge()
+
+    allowed, entry_index, reason = t._entry_decision(improved)
+    assert allowed is True
+    assert entry_index == 2
+    assert "odds improved" in reason
+    second = t._place_paper_bet(
+        market,
+        improved,
+        entry_index=entry_index,
+        entry_reason=reason,
+    )
+    assert second is not None
+    assert second.entry_index == 2
+    assert second.liability < first.liability
+    assert len(s.all()) == 2
 
 
 def test_new_bets_capture_full_attribution():

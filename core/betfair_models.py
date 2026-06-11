@@ -271,6 +271,8 @@ class PaperBet(BaseModel):
     market_name: str = ""
     competition: str = ""
     sleeve: str = "legacy"
+    entry_index: int = 1
+    entry_reason: str = "initial"
     edge_band: str = ""        # e.g. "5-8%", "8-12%", ">12%"
     confidence_band: str = ""  # e.g. "low", "med", "high"
     strategy: str = "value"    # "value" | "fade_overreaction" | ...

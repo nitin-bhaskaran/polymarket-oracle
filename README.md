@@ -190,6 +190,10 @@ The default configuration includes:
 - A paper-only portfolio-wide 75% open-liability ceiling and 50-open-bet
   ceiling. These limits preserve bankroll realism without starving the
   validation sample.
+- Up to five entries per market and three per selection. Different selections
+  are allowed, while a repeated entry on the same selection requires a fresh
+  material improvement in odds or assessed edge. Same-selection entries scale
+  down to 100%, 50%, then 25% of the fresh Kelly recommendation.
 
 Existing paper records remain tagged `legacy`; new records include domain,
 competition, event, market type, sleeve, and strategy attribution. The paper

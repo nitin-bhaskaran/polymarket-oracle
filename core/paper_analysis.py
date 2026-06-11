@@ -169,6 +169,7 @@ def analyse(path: str, min_n: int = 10):
         "domain": lambda b: b.domain or "legacy/unknown",
         "market_type": lambda b: b.sport or "unknown",
         "sleeve": lambda b: b.sleeve or "legacy",
+        "entry_index": lambda b: str(b.entry_index),
         "competition": lambda b: b.competition or "legacy/unknown",
         "side": lambda b: b.side.value,
         "style": lambda b: b.style.value,
