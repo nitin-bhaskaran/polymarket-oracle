@@ -157,7 +157,7 @@ class BetfairClient:
         """
         if market_projection is None:
             market_projection = [
-                "EVENT", "COMPETITION", "MARKET_START_TIME",
+                "EVENT", "EVENT_TYPE", "COMPETITION", "MARKET_START_TIME",
                 "RUNNER_DESCRIPTION", "MARKET_DESCRIPTION",
             ]
         return self._rpc(

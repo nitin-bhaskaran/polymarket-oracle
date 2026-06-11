@@ -120,7 +120,8 @@ class BetfairMarket(BaseModel):
     event_name: str = ""
     market_name: str = ""        # e.g. "Match Odds"
     competition: str = ""
-    sport: str = ""              # event type group (Soccer, Politics, ...)
+    domain: str = ""             # event type group (Soccer, Politics, ...)
+    sport: str = ""              # legacy field: Betfair market type code
 
     start_time: Optional[datetime] = None
     phase: MarketPhase = MarketPhase.PRE_EVENT
@@ -264,7 +265,12 @@ class PaperBet(BaseModel):
 
     # ── Attribution tags (for slicing results) ──
     phase: MarketPhase = MarketPhase.PRE_EVENT
-    sport: str = ""
+    domain: str = ""
+    sport: str = ""              # legacy field: Betfair market type code
+    event_name: str = ""
+    market_name: str = ""
+    competition: str = ""
+    sleeve: str = "legacy"
     edge_band: str = ""        # e.g. "5-8%", "8-12%", ">12%"
     confidence_band: str = ""  # e.g. "low", "med", "high"
     strategy: str = "value"    # "value" | "fade_overreaction" | ...

@@ -78,17 +78,154 @@ class BetfairPaperTrader:
         paper = config.get("paper", {})
         self.passive_timeout_s = paper.get("passive_timeout_seconds", 1800)
         self.max_bets_per_cycle = paper.get("max_bets_per_cycle", 5)
+        self.max_open_bets = paper.get("max_open_bets", 0)
+        self.max_total_exposure_pct = paper.get(
+            "max_total_exposure_pct", 100.0
+        ) / 100
+        self.max_open_bets_per_market = paper.get(
+            "max_open_bets_per_market", 0
+        )
+        self.default_sleeve = paper.get(
+            "default_sleeve", {"name": "general"}
+        )
+        self.sleeves = paper.get("sleeves", [])
 
     # ── capital accounting (paper) ──
 
     def _deployed(self) -> float:
-        """Sum liabilities of filled, unsettled bets."""
-        return sum(b.liability for b in self.store.filled_unsettled())
+        """Sum liabilities reserved by filled and pending bets."""
+        return self.store.open_liability()
 
     def _available_capital(self) -> float:
         realised = sum((b.net_pnl or 0.0) for b in self.store.all()
                        if b.status == PaperBetStatus.SETTLED)
         return self.starting_capital + realised - self._deployed()
+
+    # ── strategy sleeves + exposure controls ──
+
+    @staticmethod
+    def _pct_limit(policy: dict, key: str, capital: float) -> float:
+        value = policy.get(key)
+        if value is None:
+            return float("inf")
+        return capital * float(value) / 100
+
+    def _market_policy(self, market) -> tuple[dict, str]:
+        """
+        Select a strategy sleeve for a market.
+
+        A matching sleeve may restrict its own market types without narrowing
+        the rest of the scanner. The reason is non-empty when the sleeve blocks
+        this market.
+        """
+        haystack = " | ".join([
+            market.event_name or "",
+            market.competition or "",
+            market.market_name or "",
+        ]).lower()
+        market_type = (market.sport or "").upper()
+
+        for raw in self.sleeves:
+            policy = dict(raw)
+            keywords = [
+                str(value).lower()
+                for value in policy.get("match_any", [])
+                if value
+            ]
+            if keywords and not any(keyword in haystack for keyword in keywords):
+                continue
+
+            allowed = {
+                str(value).upper()
+                for value in policy.get("allowed_market_types", [])
+            }
+            if allowed and market_type not in allowed:
+                return policy, (
+                    f"market type {market_type or 'unknown'} is outside sleeve "
+                    f"{policy.get('name', 'unnamed')} "
+                    f"({', '.join(sorted(allowed))})"
+                )
+            if not policy.get("enabled", True):
+                return policy, (
+                    f"sleeve {policy.get('name', 'unnamed')} is disabled"
+                )
+            return policy, ""
+
+        return dict(self.default_sleeve), ""
+
+    def _exposure_capacity(self, market, policy: dict) -> tuple[float, str]:
+        """Return remaining liability capacity and a rejection reason."""
+        open_bets = self.store.open_bets()
+        sleeve = policy.get("name", "general")
+
+        if self.max_open_bets and len(open_bets) >= self.max_open_bets:
+            return 0.0, f"max open bets reached ({self.max_open_bets})"
+
+        market_max = policy.get(
+            "max_open_bets_per_market", self.max_open_bets_per_market
+        )
+        market_open = self.store.open_count(market_id=market.market_id)
+        if market_max and market_open >= int(market_max):
+            return 0.0, (
+                f"market already has {market_open} open bet(s); "
+                f"limit {market_max}"
+            )
+
+        event_max = policy.get("max_open_bets_per_event", 0)
+        event_open = self.store.open_count(event_name=market.event_name)
+        if market.event_name and event_max and event_open >= int(event_max):
+            return 0.0, (
+                f"event already has {event_open} open bet(s); "
+                f"limit {event_max}"
+            )
+
+        total_remaining = (
+            self.starting_capital * self.max_total_exposure_pct
+            - self.store.open_liability()
+        )
+        sleeve_remaining = (
+            self._pct_limit(
+                policy, "max_exposure_pct", self.starting_capital
+            )
+            - self.store.open_liability(sleeve=sleeve)
+        )
+        market_remaining = (
+            self._pct_limit(
+                policy, "max_market_exposure_pct", self.starting_capital
+            )
+            - self.store.open_liability(market_id=market.market_id)
+        )
+        event_remaining = (
+            self._pct_limit(
+                policy, "max_event_exposure_pct", self.starting_capital
+            )
+            - self.store.open_liability(event_name=market.event_name)
+        )
+        capacity = min(
+            self._available_capital(),
+            total_remaining,
+            sleeve_remaining,
+            market_remaining,
+            event_remaining,
+        )
+        if capacity <= 0:
+            return 0.0, (
+                f"exposure capacity exhausted for sleeve={sleeve} "
+                f"(total deployed £{self.store.open_liability():.2f})"
+            )
+        return capacity, ""
+
+    def _cap_sizing(self, sizing: dict, odds: float, side: BetSide,
+                    capacity: float) -> dict:
+        """Clamp a Kelly decision to remaining exposure capacity."""
+        liability = min(float(sizing["liability"]), max(0.0, capacity))
+        if side == BetSide.BACK:
+            stake = liability
+        else:
+            stake = liability / (odds - 1.0)
+        if stake < self.min_stake or liability <= 0:
+            return {"stake": 0.0, "liability": 0.0}
+        return {"stake": stake, "liability": liability}
 
     # ── assessment routing (single-stage or two-stage + governor) ──
 
@@ -216,6 +353,22 @@ class BetfairPaperTrader:
         for market in markets:
             if placed >= self.max_bets_per_cycle:
                 break
+
+            policy, policy_rejection = self._market_policy(market)
+            if policy_rejection:
+                logger.info(
+                    f"Skipping assessment of {market.event_name} / "
+                    f"{market.market_name}: {policy_rejection}"
+                )
+                continue
+            _, capacity_rejection = self._exposure_capacity(market, policy)
+            if capacity_rejection:
+                logger.info(
+                    f"Skipping assessment of {market.event_name} / "
+                    f"{market.market_name}: {capacity_rejection}"
+                )
+                continue
+
             assessments = self._assess(market)
             for a in assessments:
                 if placed >= self.max_bets_per_cycle:
@@ -239,6 +392,23 @@ class BetfairPaperTrader:
         return placed
 
     def _place_paper_bet(self, market, assessment):
+        policy, policy_rejection = self._market_policy(market)
+        sleeve = policy.get("name", "general")
+        if policy_rejection:
+            logger.info(
+                f"Skipping {market.event_name} / {market.market_name}: "
+                f"{policy_rejection}"
+            )
+            return None
+
+        capacity, capacity_rejection = self._exposure_capacity(market, policy)
+        if capacity_rejection:
+            logger.info(
+                f"Skipping {market.event_name} / {market.market_name}: "
+                f"{capacity_rejection}"
+            )
+            return None
+
         side = assessment.recommended_side
         # Choose the price/odds for the side.
         if side == BetSide.BACK:
@@ -266,6 +436,9 @@ class BetfairPaperTrader:
         )
         if sizing["stake"] <= 0:
             return None
+        sizing = self._cap_sizing(sizing, odds, side, capacity)
+        if sizing["stake"] <= 0:
+            return None
 
         style = OrderStyle.PASSIVE if market.in_play else OrderStyle.CROSS
         bet = PaperBet(
@@ -284,10 +457,15 @@ class BetfairPaperTrader:
             edge_at_placement=assessment.edge,
             confidence=assessment.confidence,
             phase=market.phase,
+            domain=market.domain,
             sport=market.sport,
+            event_name=market.event_name,
+            market_name=market.market_name,
+            competition=market.competition,
+            sleeve=sleeve,
             edge_band=PaperBet.band_edge(assessment.abs_edge),
             confidence_band=PaperBet.band_confidence(assessment.confidence),
-            strategy="value",
+            strategy="llm_value",
         )
 
         # CROSS fills immediately against current depth; PASSIVE rests.
@@ -299,6 +477,7 @@ class BetfairPaperTrader:
             f"PLACED paper {side.value} {assessment.runner_name} @ {bet.requested_odds} "
             f"(filled={bet.filled_odds if bet.status == PaperBetStatus.FILLED else 'no'}, "
             f"status={bet.status.value}, stake £{bet.stake:.2f}, liability £{bet.liability:.2f}, "
+            f"sleeve={bet.sleeve}, "
             f"edge {assessment.edge:+.1%}, AI {assessment.estimated_probability:.0%} vs "
             f"fair {assessment.market_fair_prob:.0%}) — {market.event_name} / {market.market_name}"
         )
@@ -327,11 +506,19 @@ class BetfairPaperTrader:
     def _settle_resolved(self):
         for market_id in self.store.open_market_ids():
             market = self.scanner.refresh_book(market_id)
-            if not market or market.phase != MarketPhase.SETTLED:
+            if not market or market.phase not in (
+                MarketPhase.CLOSED, MarketPhase.SETTLED
+            ):
                 continue
             # Determine winners from runner status.
             winners = {r.selection_id for r in market.runners
                        if r.status == RunnerStatus.WINNER}
+            if not winners:
+                logger.info(
+                    f"Market {market_id} is closed without an explicit winner; "
+                    "leaving paper bets unresolved (void/suspended result)."
+                )
+                continue
             for bet in self.store.filled_unsettled():
                 if bet.market_id != market_id:
                     continue
@@ -355,6 +542,9 @@ class BetfairPaperTrader:
                 "last_cycle_at": datetime.now(timezone.utc).isoformat(),
                 "available_capital": self._available_capital(),
                 "deployed": self._deployed(),
+                "max_total_exposure": (
+                    self.starting_capital * self.max_total_exposure_pct
+                ),
                 "bet_counts": counts,
             }
             p = Path("data/health.json")

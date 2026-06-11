@@ -103,10 +103,15 @@ python -m core.paper_analysis
 ```
 
 Reports per-slice win rate, ROI-on-risk, Brier score, calibration table, and a
-£100-bankroll simulation. **Results are only meaningful at ~50–100 settled
+£100-bankroll simulation. The Brier output is shown as `AI/mkt`; positive
+`skill` means the AI probability beat Betfair's probability baseline, while
+negative skill means the market was better. Results are sliced by strategy
+sleeve, domain, competition, and market type.
+
+**Results are only meaningful at ~50–100 settled
 bets** — below that, treat every number as noise. Watch for:
 - the £100 equity line climbing vs bleeding
-- Brier score below 0.25 (calibrated) vs above (not calibrated)
+- positive Brier skill against the Betfair baseline
 - any single slice persistently positive at decent n (a possible real edge)
 
 ---

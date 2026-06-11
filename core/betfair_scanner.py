@@ -185,8 +185,10 @@ class BetfairScanner:
 
             in_play = bool(book.get("inplay", False))
             status = book.get("status", "OPEN")
-            if status in ("CLOSED", "SETTLED"):
+            if status == "SETTLED":
                 phase = MarketPhase.SETTLED
+            elif status == "CLOSED":
+                phase = MarketPhase.CLOSED
             elif in_play:
                 phase = MarketPhase.IN_PLAY
             else:
@@ -225,6 +227,8 @@ class BetfairScanner:
                 event_name=event.get("name", ""),
                 market_name=cat.get("marketName", ""),
                 competition=comp.get("name", ""),
+                domain=(cat.get("eventType") or {}).get("name", "")
+                       or str(event.get("eventTypeId", "")),
                 sport=desc.get("marketType", "") or event.get("eventTypeId", ""),
                 start_time=start_time,
                 phase=phase,

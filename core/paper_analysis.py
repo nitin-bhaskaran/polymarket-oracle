@@ -20,7 +20,12 @@ import argparse
 from collections import defaultdict
 
 from core.paper_store import PaperBetStore
-from core.betfair_models import PaperBet, PaperBetStatus
+from core.betfair_models import BetSide, PaperBet, PaperBetStatus
+
+
+def _runner_won(bet: PaperBet) -> bool:
+    """Return the runner outcome, which is the inverse of a winning LAY bet."""
+    return bool(bet.won) if bet.side == BetSide.BACK else not bool(bet.won)
 
 
 def _stats(bets: list[PaperBet]) -> dict:
@@ -34,7 +39,14 @@ def _stats(bets: list[PaperBet]) -> dict:
     wins = sum(1 for b in settled if b.won)
     net = sum((b.net_pnl or 0.0) for b in settled)
     risked = sum(b.liability for b in settled) or 1.0
-    brier = sum((b.ai_probability - (1.0 if b.won else 0.0)) ** 2 for b in settled) / n
+    ai_brier = sum(
+        (b.ai_probability - (1.0 if _runner_won(b) else 0.0)) ** 2
+        for b in settled
+    ) / n
+    market_brier = sum(
+        (b.market_fair_prob - (1.0 if _runner_won(b) else 0.0)) ** 2
+        for b in settled
+    ) / n
 
     return {
         "placed": placed,
@@ -45,7 +57,9 @@ def _stats(bets: list[PaperBet]) -> dict:
         "net_pnl": net,
         "avg_pnl": net / n,
         "roi_on_risk": net / risked,
-        "brier": brier,
+        "brier": ai_brier,
+        "market_brier": market_brier,
+        "brier_skill": market_brier - ai_brier,
     }
 
 
@@ -56,7 +70,8 @@ def _fmt(s: dict) -> str:
             f"win={s['win_rate']*100:5.1f}% "
             f"net={s['net_pnl']:+8.2f} "
             f"roi/risk={s['roi_on_risk']*100:+6.1f}% "
-            f"brier={s['brier']:.3f}")
+            f"AI/mkt brier={s['brier']:.3f}/{s['market_brier']:.3f} "
+            f"skill={s['brier_skill']:+.3f}")
 
 
 def _calibration(bets: list[PaperBet], buckets=10) -> str:
@@ -67,8 +82,8 @@ def _calibration(bets: list[PaperBet], buckets=10) -> str:
     for b in settled:
         idx = min(buckets - 1, int(b.ai_probability * buckets))
         rows[idx][0] += 1
-        rows[idx][1] += 1 if b.won else 0
-    lines = ["  predicted -> actual   (n)"]
+        rows[idx][1] += 1 if _runner_won(b) else 0
+    lines = ["  predicted P(runner wins) -> actual   (n)"]
     for i in range(buckets):
         if i not in rows:
             continue
@@ -151,7 +166,10 @@ def analyse(path: str, min_n: int = 10):
 
     dimensions = {
         "phase": lambda b: b.phase.value,
-        "sport": lambda b: b.sport or "unknown",
+        "domain": lambda b: b.domain or "legacy/unknown",
+        "market_type": lambda b: b.sport or "unknown",
+        "sleeve": lambda b: b.sleeve or "legacy",
+        "competition": lambda b: b.competition or "legacy/unknown",
         "side": lambda b: b.side.value,
         "style": lambda b: b.style.value,
         "edge_band": lambda b: b.edge_band,

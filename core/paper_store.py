@@ -76,6 +76,13 @@ class PaperBetStore:
     def filled_unsettled(self) -> list[PaperBet]:
         return [b for b in self._bets.values() if b.status == PaperBetStatus.FILLED]
 
+    def open_bets(self) -> list[PaperBet]:
+        """Bets that still reserve exposure, whether filled or awaiting fill."""
+        return [
+            b for b in self._bets.values()
+            if b.status in (PaperBetStatus.PENDING, PaperBetStatus.FILLED)
+        ]
+
     def open_market_ids(self) -> set[str]:
         """Markets with FILLED-but-unsettled bets — keep polling these for resolution."""
         return {b.market_id for b in self.filled_unsettled()}
@@ -87,6 +94,28 @@ class PaperBetStore:
                     and b.status in (PaperBetStatus.PENDING, PaperBetStatus.FILLED)):
                 return True
         return False
+
+    def open_count(self, *, market_id: str = "", event_name: str = "",
+                   sleeve: str = "") -> int:
+        bets = self.open_bets()
+        if market_id:
+            bets = [b for b in bets if b.market_id == market_id]
+        if event_name:
+            bets = [b for b in bets if b.event_name == event_name]
+        if sleeve:
+            bets = [b for b in bets if b.sleeve == sleeve]
+        return len(bets)
+
+    def open_liability(self, *, market_id: str = "", event_name: str = "",
+                       sleeve: str = "") -> float:
+        bets = self.open_bets()
+        if market_id:
+            bets = [b for b in bets if b.market_id == market_id]
+        if event_name:
+            bets = [b for b in bets if b.event_name == event_name]
+        if sleeve:
+            bets = [b for b in bets if b.sleeve == sleeve]
+        return sum(b.liability for b in bets)
 
     def count_by_status(self) -> dict:
         out: dict = {}

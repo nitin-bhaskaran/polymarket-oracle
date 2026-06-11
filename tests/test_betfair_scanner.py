@@ -32,6 +32,7 @@ def make_scanner(in_play_enabled=False, min_matched=1000.0):
         "marketName": "Match Odds",
         "marketStartTime": _start(5),
         "event": {"id": "e1", "name": "Home v Away"},
+        "eventType": {"id": "1", "name": "Soccer"},
         "competition": {"name": "Premier League"},
         "description": {"marketType": "MATCH_ODDS"},
         "runners": [
@@ -74,6 +75,7 @@ def test_scan_builds_market_with_runners():
     assert m.market_id == "1.100"
     assert m.event_name == "Home v Away"
     assert m.competition == "Premier League"
+    assert m.domain == "Soccer"
     assert len(m.runners) == 3
     assert m.phase == MarketPhase.PRE_EVENT
 
@@ -115,6 +117,14 @@ def test_in_play_included_when_enabled():
     markets = s.scan()
     assert len(markets) == 1
     assert markets[0].phase == MarketPhase.IN_PLAY
+
+
+def test_closed_market_is_not_assumed_settled():
+    s = make_scanner()
+    s.client._books[0]["status"] = "CLOSED"
+    markets = s.scan()
+    assert len(markets) == 1
+    assert markets[0].phase == MarketPhase.CLOSED
 
 
 def test_excludes_markets_beyond_resolution_horizon():

@@ -98,9 +98,9 @@ class _Assessor:
         return [a]
 
 
-def _trader(scanner, assessor, store):
+def _trader(scanner, assessor, store, paper=None):
     config = {"risk": {"starting_capital": 1000, "max_position_pct": 10.0, "min_stake": 1.0},
-              "betfair_assessor": {"min_edge": 0.05}, "paper": {}}
+              "betfair_assessor": {"min_edge": 0.05}, "paper": paper or {}}
     return BetfairPaperTrader(config, scanner, assessor, store=store)
 
 
@@ -164,3 +164,101 @@ def test_no_duplicate_bet_same_selection():
     n1 = len(s.all())
     t.run_cycle()  # same market/selection still open -> no dupe
     assert len(s.all()) == n1
+
+
+def test_new_bets_capture_full_attribution():
+    s = _store()
+    market = _market()
+    market.domain = "Soccer"
+    market.competition = "FIFA World Cup"
+    t = _trader(market_scanner := _Scanner(market), _Assessor(0.60), s)
+    assert market_scanner.m is market
+    t.run_cycle()
+    bet = s.all()[0]
+    assert bet.domain == "Soccer"
+    assert bet.sport == "Soccer"
+    assert bet.event_name == "A v B"
+    assert bet.market_name == "Match Odds"
+    assert bet.competition == "FIFA World Cup"
+    assert bet.sleeve == "general"
+    assert bet.strategy == "llm_value"
+
+
+def test_world_cup_sleeve_only_accepts_match_odds():
+    paper = {
+        "default_sleeve": {"name": "general"},
+        "sleeves": [{
+            "name": "fifa_world_cup",
+            "match_any": ["fifa world cup"],
+            "allowed_market_types": ["MATCH_ODDS"],
+        }],
+    }
+    t = _trader(_Scanner(_market()), _Assessor(), _store(), paper=paper)
+
+    match = _market()
+    match.competition = "FIFA World Cup"
+    match.sport = "MATCH_ODDS"
+    policy, reason = t._market_policy(match)
+    assert policy["name"] == "fifa_world_cup"
+    assert reason == ""
+
+    outright = _market()
+    outright.event_name = "FIFA World Cup"
+    outright.sport = "TOURNAMENT_WINNER"
+    policy, reason = t._market_policy(outright)
+    assert policy["name"] == "fifa_world_cup"
+    assert "outside sleeve" in reason
+
+    general = _market()
+    general.competition = "Premier League"
+    general.sport = "MATCH_ODDS"
+    policy, reason = t._market_policy(general)
+    assert policy["name"] == "general"
+    assert reason == ""
+
+
+def test_total_exposure_cap_clamps_liability():
+    s = _store()
+    paper = {"max_total_exposure_pct": 5.0}
+    t = _trader(_Scanner(_market()), _Assessor(0.80), s, paper=paper)
+    assert t.run_cycle() == 1
+    assert s.all()[0].liability <= 50.0
+
+
+def test_market_open_bet_limit_blocks_correlated_second_position():
+    s = _store()
+    paper = {"max_open_bets_per_market": 1}
+    market = _market()
+    t = _trader(_Scanner(market), _Assessor(0.60), s, paper=paper)
+    assert t.run_cycle() == 1
+
+    second = BetfairAssessment(
+        market_id=market.market_id,
+        selection_id=2,
+        runner_name="B",
+        question="?",
+        estimated_probability=0.60,
+        confidence=0.8,
+        market_fair_prob=market.fair_implied_prob(market.runners[1]),
+        best_back=2.0,
+        best_lay=2.04,
+        commission_rate=0.05,
+    )
+    second.calculate_edge()
+    assert t._place_paper_bet(market, second) is None
+    assert len(s.all()) == 1
+
+
+def test_closed_market_without_winner_is_not_settled():
+    class ClosedScanner(_Scanner):
+        def refresh_book(self, mid):
+            market = _market()
+            market.phase = MarketPhase.CLOSED
+            return market
+
+    s = _store()
+    scanner = ClosedScanner(_market())
+    t = _trader(scanner, _Assessor(0.60), s)
+    t.run_cycle()
+    t._settle_resolved()
+    assert s.all()[0].status == PaperBetStatus.FILLED

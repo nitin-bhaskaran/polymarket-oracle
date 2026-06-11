@@ -184,6 +184,29 @@ paper:
   governor_state_path: "data/governor.json"
   passive_timeout_seconds: 1800   # resting in-play limit orders expire after this
   max_bets_per_cycle: 5
+  # Portfolio controls. Pending bets reserve exposure as well as filled bets.
+  max_open_bets: 30
+  max_total_exposure_pct: 60.0
+  max_open_bets_per_market: 1
+
+  # Broad discovery remains enabled. Matching markets are routed into a sleeve
+  # with their own market-type and exposure rules; everything else is general.
+  default_sleeve:
+    name: "general"
+    max_exposure_pct: 45.0
+    max_market_exposure_pct: 5.0
+    max_event_exposure_pct: 10.0
+    max_open_bets_per_event: 2
+  sleeves:
+    - name: "fifa_world_cup"
+      match_any:
+        - "fifa world cup"
+      allowed_market_types:
+        - "MATCH_ODDS"
+      max_exposure_pct: 20.0
+      max_market_exposure_pct: 3.0
+      max_event_exposure_pct: 3.0
+      max_open_bets_per_event: 1
   # Cost governor
   daily_deep_assessment_budget: 30   # hard cap on web-search assessments/day
   deep_min_interval_seconds: 20.0    # min gap between deep assessments (stay under tokens/min rate limit)

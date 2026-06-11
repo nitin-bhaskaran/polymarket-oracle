@@ -174,6 +174,24 @@ This repo is in dry-run/paper-trading hardening. Live trading should wait until:
 - Probability assessments have enough fresh news/context for the target market categories
 - The test suite passes locally and on CI
 
+### Betfair validation sleeves
+
+The Betfair paper path keeps broad market discovery, then routes matching
+markets into configurable strategy sleeves. Sleeves can restrict their own
+market types and enforce independent exposure limits without narrowing the
+rest of the scanner.
+
+The default configuration includes:
+
+- `fifa_world_cup`: FIFA World Cup `MATCH_ODDS` only, capped at 20% total
+  bankroll exposure, 3% per match, and one open position per match.
+- `general`: all other markets, with its own sleeve, event, and market limits.
+- A portfolio-wide 60% open-liability ceiling and 30-open-bet ceiling.
+
+Existing paper records remain tagged `legacy`; new records include domain,
+competition, event, market type, sleeve, and strategy attribution. The paper
+analysis compares AI Brier score directly with the Betfair market baseline.
+
 ## License
 
 MIT
