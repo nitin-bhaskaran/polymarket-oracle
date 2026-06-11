@@ -99,8 +99,10 @@ class _Assessor:
 
 
 def _trader(scanner, assessor, store, paper=None):
+    paper_config = dict(paper or {})
+    paper_config.setdefault("health_path", str(store.path.with_name("health.json")))
     config = {"risk": {"starting_capital": 1000, "max_position_pct": 10.0, "min_stake": 1.0},
-              "betfair_assessor": {"min_edge": 0.05}, "paper": paper or {}}
+              "betfair_assessor": {"min_edge": 0.05}, "paper": paper_config}
     return BetfairPaperTrader(config, scanner, assessor, store=store)
 
 
@@ -184,13 +186,18 @@ def test_new_bets_capture_full_attribution():
     assert bet.strategy == "llm_value"
 
 
-def test_world_cup_sleeve_only_accepts_match_odds():
+def test_world_cup_sleeve_accepts_supported_liquid_markets():
     paper = {
         "default_sleeve": {"name": "general"},
         "sleeves": [{
             "name": "fifa_world_cup",
             "match_any": ["fifa world cup"],
-            "allowed_market_types": ["MATCH_ODDS"],
+            "allowed_market_types": [
+                "MATCH_ODDS",
+                "OVER_UNDER_25",
+                "BOTH_TEAMS_TO_SCORE",
+                "DRAW_NO_BET",
+            ],
         }],
     }
     t = _trader(_Scanner(_market()), _Assessor(), _store(), paper=paper)
@@ -199,6 +206,13 @@ def test_world_cup_sleeve_only_accepts_match_odds():
     match.competition = "FIFA World Cup"
     match.sport = "MATCH_ODDS"
     policy, reason = t._market_policy(match)
+    assert policy["name"] == "fifa_world_cup"
+    assert reason == ""
+
+    totals = _market()
+    totals.competition = "FIFA World Cup"
+    totals.sport = "OVER_UNDER_25"
+    policy, reason = t._market_policy(totals)
     assert policy["name"] == "fifa_world_cup"
     assert reason == ""
 

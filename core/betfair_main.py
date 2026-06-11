@@ -93,6 +93,14 @@ def build(config):
     return client, scanner, assessor, trader, two_stage, governor
 
 
+def paper_scan_interval(config: dict) -> float:
+    """Paper-loop cadence lives in the paper block, with legacy fallback."""
+    return config.get("paper", {}).get(
+        "scan_interval",
+        config.get("scanner", {}).get("scan_interval", 300),
+    )
+
+
 def scan_once(config):
     client, scanner, assessor, trader, two_stage, governor = build(config)
     if not client.login():
@@ -125,7 +133,7 @@ def run_paper(config):
     if not client.login():
         logger.error("Login failed")
         return
-    interval = config.get("scanner", {}).get("scan_interval", 300)
+    interval = paper_scan_interval(config)
     logger.info(f"Starting Betfair PAPER trading loop (interval {interval}s). No real bets.")
     cycle = 0
     try:

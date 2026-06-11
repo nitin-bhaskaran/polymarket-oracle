@@ -183,10 +183,13 @@ rest of the scanner.
 
 The default configuration includes:
 
-- `fifa_world_cup`: FIFA World Cup `MATCH_ODDS` only, capped at 20% total
-  bankroll exposure, 3% per match, and one open position per match.
+- `fifa_world_cup`: liquid, modelable FIFA World Cup markets (`MATCH_ODDS`,
+  `OVER_UNDER_25`, `BOTH_TEAMS_TO_SCORE`, and `DRAW_NO_BET`), capped at 25%
+  total bankroll exposure, 3% per market, and three open markets per match.
 - `general`: all other markets, with its own sleeve, event, and market limits.
-- A portfolio-wide 60% open-liability ceiling and 30-open-bet ceiling.
+- A paper-only portfolio-wide 75% open-liability ceiling and 50-open-bet
+  ceiling. These limits preserve bankroll realism without starving the
+  validation sample.
 
 Existing paper records remain tagged `legacy`; new records include domain,
 competition, event, market type, sleeve, and strategy attribution. The paper

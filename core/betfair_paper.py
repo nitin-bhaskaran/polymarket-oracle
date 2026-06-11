@@ -76,6 +76,7 @@ class BetfairPaperTrader:
         self._last_deep_at = 0.0
 
         paper = config.get("paper", {})
+        self.health_path = paper.get("health_path", "data/health.json")
         self.passive_timeout_s = paper.get("passive_timeout_seconds", 1800)
         self.max_bets_per_cycle = paper.get("max_bets_per_cycle", 5)
         self.max_open_bets = paper.get("max_open_bets", 0)
@@ -350,12 +351,22 @@ class BetfairPaperTrader:
         logger.info(f"Scanning returned {len(markets)} markets")
 
         placed = 0
+        funnel = {
+            "scanned": len(markets),
+            "policy_blocked": 0,
+            "exposure_blocked": 0,
+            "eligible": 0,
+            "assessments": 0,
+            "below_edge": 0,
+            "duplicate_selection": 0,
+        }
         for market in markets:
             if placed >= self.max_bets_per_cycle:
                 break
 
             policy, policy_rejection = self._market_policy(market)
             if policy_rejection:
+                funnel["policy_blocked"] += 1
                 logger.info(
                     f"Skipping assessment of {market.event_name} / "
                     f"{market.market_name}: {policy_rejection}"
@@ -363,19 +374,24 @@ class BetfairPaperTrader:
                 continue
             _, capacity_rejection = self._exposure_capacity(market, policy)
             if capacity_rejection:
+                funnel["exposure_blocked"] += 1
                 logger.info(
                     f"Skipping assessment of {market.event_name} / "
                     f"{market.market_name}: {capacity_rejection}"
                 )
                 continue
 
+            funnel["eligible"] += 1
             assessments = self._assess(market)
+            funnel["assessments"] += len(assessments)
             for a in assessments:
                 if placed >= self.max_bets_per_cycle:
                     break
                 if a.abs_edge < self.min_edge:
+                    funnel["below_edge"] += 1
                     continue
                 if self.store.has_open_position(a.market_id, a.selection_id):
+                    funnel["duplicate_selection"] += 1
                     continue
                 bet = self._place_paper_bet(market, a)
                 if bet:
@@ -388,6 +404,17 @@ class BetfairPaperTrader:
 
         self._heartbeat()
         counts = self.store.count_by_status()
+        logger.info(
+            "Cycle funnel: "
+            f"scanned={funnel['scanned']} "
+            f"eligible={funnel['eligible']} "
+            f"policy_blocked={funnel['policy_blocked']} "
+            f"exposure_blocked={funnel['exposure_blocked']} "
+            f"assessments={funnel['assessments']} "
+            f"below_edge={funnel['below_edge']} "
+            f"duplicate_selection={funnel['duplicate_selection']} "
+            f"placed={placed}"
+        )
         logger.info(f"Paper cycle done. Placed {placed}. Status counts: {counts}")
         return placed
 
@@ -547,7 +574,7 @@ class BetfairPaperTrader:
                 ),
                 "bet_counts": counts,
             }
-            p = Path("data/health.json")
+            p = Path(self.health_path)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(json.dumps(health, indent=2, default=str))
         except Exception as e:
