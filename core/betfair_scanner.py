@@ -235,6 +235,7 @@ class BetfairScanner:
                 in_play=in_play,
                 total_matched=book.get("totalMatched", 0.0) or 0.0,
                 commission_rate=self.default_commission,
+                market_version=book.get("version"),
                 runners=runners,
             )
         except Exception as e:

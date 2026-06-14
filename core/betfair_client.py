@@ -203,5 +203,59 @@ class BetfairClient:
             },
         )
 
+    def get_account_funds(self) -> dict:
+        """Return available balance, exposure, and commission information."""
+        return self._rpc(
+            "AccountAPING/v1.0/getAccountFunds",
+            {},
+            endpoint=ACCOUNT_URL,
+        )
+
+    def get_developer_app_keys(self) -> list[dict]:
+        """Return this account's application versions and key metadata."""
+        return self._rpc(
+            "AccountAPING/v1.0/getDeveloperAppKeys",
+            {},
+            endpoint=ACCOUNT_URL,
+        )
+
+    def place_limit_order(
+        self, market_id: str, selection_id: int, side: str, price: float,
+        size: float, customer_ref: str, customer_order_ref: str,
+        strategy_ref: str = "oracle-live", market_version: Optional[int] = None,
+    ) -> dict:
+        """
+        Submit one immediate fill-or-kill LIMIT order.
+
+        Omitting minFillSize requires the entire order to match; otherwise the
+        Exchange cancels it immediately. No unmatched order is left resting.
+        """
+        instruction = {
+            "selectionId": int(selection_id),
+            "handicap": 0.0,
+            "side": side,
+            "orderType": "LIMIT",
+            "limitOrder": {
+                "size": round(float(size), 2),
+                "price": float(price),
+                "persistenceType": "LAPSE",
+                "timeInForce": "FILL_OR_KILL",
+            },
+            "customerOrderRef": customer_order_ref[:32],
+        }
+        params = {
+            "marketId": market_id,
+            "instructions": [instruction],
+            "customerRef": customer_ref[:32],
+            "customerStrategyRef": strategy_ref[:15],
+            "async": False,
+        }
+        if market_version is not None:
+            params["marketVersion"] = {"version": int(market_version)}
+        return self._rpc(
+            "SportsAPING/v1.0/placeOrders",
+            params,
+        )
+
     def close(self):
         self._client.close()

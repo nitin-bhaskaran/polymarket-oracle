@@ -45,6 +45,7 @@ def make_scanner(in_play_enabled=False, min_matched=1000.0):
         "marketId": "1.100",
         "status": "OPEN",
         "inplay": False,
+        "version": 12345,
         "totalMatched": 50000.0,
         "runners": [
             {"selectionId": 11, "status": "ACTIVE", "lastPriceTraded": 2.0,
@@ -78,6 +79,7 @@ def test_scan_builds_market_with_runners():
     assert m.domain == "Soccer"
     assert len(m.runners) == 3
     assert m.phase == MarketPhase.PRE_EVENT
+    assert m.market_version == 12345
 
 
 def test_scan_prices_and_overround():

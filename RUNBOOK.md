@@ -1,6 +1,6 @@
-# RUNBOOK — Betfair paper-trading loop
+# RUNBOOK — Betfair paper and gated-live loops
 
-Operational steps for starting, stopping, and checking the paper run.
+Operational steps for starting, stopping, and checking Betfair runs.
 This is the day-to-day "how do I run it again" guide. For what the project
 *is*, see `README.md`.
 
@@ -138,3 +138,50 @@ python -m core.betfair_main --list-politics  # list political markets
 set it to `0` or remove `anthropic` from `provider_order` for strict no-paid
 operation. Keep account-level spend limits in Google AI Studio / Google Cloud
 and the Anthropic Console as external backstops.
+
+---
+
+## 8. Gated live execution
+
+The free `1.0-Delay` application key cannot place live bets. Betfair currently
+lists a £499 activation fee for betting/live-data API access. Do not deposit
+money solely for this bot until your account has an active live key.
+
+After activation, replace `BETFAIR_APP_KEY` in `.env`, then set:
+
+```yaml
+betfair:
+  app_key_mode: "live"
+
+live:
+  enabled: true
+```
+
+Arm the final acknowledgement only in the terminal that will run live:
+
+```powershell
+$env:BETFAIR_LIVE_ACK="I_ACCEPT_REAL_MONEY_RISK"
+python -m core.betfair_main --live
+```
+
+Startup queries `getDeveloperAppKeys` and refuses delayed/inactive keys. It
+also checks account balance and exposure before arming. Defaults for the £10
+experiment are:
+
+- LAY only, 8-12% edge, 50-75% confidence
+- £2 maximum liability per bet
+- £3 maximum aggregate account exposure
+- one order per cycle and two orders per UTC day
+- stop after £5 cumulative recorded loss
+- pre-event only; in-play markets are rejected
+- synchronous `FILL_OR_KILL`; no unmatched order remains resting
+
+Live state is separate from paper state:
+
+- `data/live_bets.jsonl`: accepted Exchange orders
+- `data/live_order_attempts.jsonl`: every API attempt and response
+- `data/live_governor.json`: assessment cache/budget
+- `data/live_health.json`: last-cycle heartbeat
+
+Stop with one **Ctrl-C**. Remove `BETFAIR_LIVE_ACK` or set `live.enabled:
+false` immediately afterward to disarm the next launch.

@@ -129,6 +129,7 @@ class BetfairMarket(BaseModel):
 
     total_matched: float = 0.0   # liquidity proxy
     commission_rate: float = 0.05  # fraction of net winnings (market default)
+    market_version: Optional[int] = None  # guards orders across material changes
 
     runners: list[Runner] = Field(default_factory=list)
 
@@ -280,6 +281,10 @@ class PaperBet(BaseModel):
     strategy: str = "value"    # "value" | "fade_overreaction" | ...
     assessment_provider: str = "legacy"
     assessment_model: str = "legacy"
+    execution_mode: str = "paper"
+    exchange_bet_id: str = ""
+    exchange_order_status: str = ""
+    exchange_error_code: str = ""
 
     placed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

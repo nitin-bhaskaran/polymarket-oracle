@@ -46,6 +46,7 @@ class BetfairPaperTrader:
             config.get("paper", {}).get("store_path", "data/paper_bets.jsonl")
         )
         self.alerts = alerts
+        self.execution_label = "Paper"
 
         risk = config.get("risk", {})
         self.starting_capital = risk.get("starting_capital", 130.0)
@@ -442,7 +443,7 @@ class BetfairPaperTrader:
     # ── one cycle ──
 
     def run_cycle(self):
-        logger.info("Paper cycle: scanning...")
+        logger.info(f"{self.execution_label} cycle: scanning...")
         markets = self.scanner.scan()
         logger.info(f"Scanning returned {len(markets)} markets")
 
@@ -534,7 +535,10 @@ class BetfairPaperTrader:
             f"scale_in_blocked={funnel['scale_in_blocked']} "
             f"placed={placed}"
         )
-        logger.info(f"Paper cycle done. Placed {placed}. Status counts: {counts}")
+        logger.info(
+            f"{self.execution_label} cycle done. Placed {placed}. "
+            f"Status counts: {counts}"
+        )
         return placed
 
     def _place_paper_bet(self, market, assessment, entry_index: int = 1,

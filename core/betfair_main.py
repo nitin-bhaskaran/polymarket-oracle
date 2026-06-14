@@ -5,14 +5,16 @@ Modes:
   --scan-once : log in, scan markets once, print what was found, exit (smoke test).
   --assess-once : scan + assess one cycle's markets, print edges, place no bets.
   --paper     : run the paper-trading loop continuously (default).
+  --live      : run gated real-money execution (requires all arming controls).
 
-Reads config/config.yaml plus .env overrides for secrets. No real bets are ever
-placed; this is the validation instrument.
+Reads config/config.yaml plus .env overrides for secrets. Paper mode is the
+default. Live mode is separately gated and cannot run on a delayed app key.
 
 Run analysis separately:  python -m core.paper_analysis
 """
 
 import argparse
+import copy
 import logging
 import os
 import sys
@@ -32,6 +34,11 @@ from core.betfair_assessor import BetfairAssessor
 from core.betfair_assessor2 import TwoStageAssessor
 from core.assessment_cache import AssessmentGovernor
 from core.betfair_paper import BetfairPaperTrader
+from core.betfair_live import (
+    BetfairLiveTrader, LiveConfigurationError, validate_live_config,
+    verify_live_app_key,
+)
+from core.paper_store import PaperBetStore
 
 logger = logging.getLogger("betfair.main")
 
@@ -43,12 +50,22 @@ def setup_logging(config: dict):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
         pass
+    handlers = [logging.StreamHandler(sys.stdout)]
+    try:
+        handlers.append(
+            logging.FileHandler("logs/betfair.log", encoding="utf-8")
+        )
+    except OSError as exc:
+        print(
+            f"Warning: logs/betfair.log is unavailable ({exc}); "
+            "continuing with console logging only",
+            file=sys.stderr,
+        )
     logging.basicConfig(
         level=level,
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout),
-                  logging.FileHandler("logs/betfair.log", encoding="utf-8")],
+        handlers=handlers,
     )
 
 
@@ -104,6 +121,10 @@ def paper_scan_interval(config: dict) -> float:
     )
 
 
+def live_scan_interval(config: dict) -> float:
+    return config.get("live", {}).get("scan_interval", 900)
+
+
 def scan_once(config):
     client, scanner, assessor, trader, two_stage, governor = build(config)
     if not client.login():
@@ -152,6 +173,94 @@ def run_paper(config):
         logger.info("Shutdown requested")
     finally:
         client.close()
+
+
+def build_live(config):
+    validate_live_config(config)
+    client = BetfairClient(config)
+    scanner = BetfairScanner(config, client=client)
+    assessor = BetfairAssessor(config)
+    two_stage = TwoStageAssessor(config)
+
+    governor_config = copy.deepcopy(config)
+    live = config.get("live", {})
+    governor_config.setdefault("paper", {})["governor_state_path"] = live.get(
+        "governor_state_path", "data/live_governor.json"
+    )
+    governor = AssessmentGovernor(governor_config)
+    store = PaperBetStore(live.get("store_path", "data/live_bets.jsonl"))
+    trader = BetfairLiveTrader(
+        config, scanner, assessor, client=client, store=store,
+        two_stage=two_stage, governor=governor,
+    )
+    return client, trader
+
+
+def run_live(config):
+    try:
+        client, trader = build_live(config)
+    except LiveConfigurationError as exc:
+        logger.error("LIVE MODE REFUSED: %s", exc)
+        return 2
+    if not client.login():
+        logger.error("LIVE MODE REFUSED: Betfair login failed")
+        return 2
+    try:
+        verify_live_app_key(client)
+        funds = client.get_account_funds()
+    except LiveConfigurationError as exc:
+        logger.error("LIVE MODE REFUSED: %s", exc)
+        client.close()
+        return 2
+    except Exception as exc:
+        logger.error("LIVE MODE REFUSED: Betfair preflight failed: %s", exc)
+        client.close()
+        return 2
+
+    live = config.get("live", {})
+    available = float(funds.get("availableToBetBalance", 0.0) or 0.0)
+    exposure = abs(float(funds.get("exposure", 0.0) or 0.0))
+    bankroll = float(live.get("bankroll_gbp", 10.0))
+    total_cap = float(live.get("max_total_liability_gbp", 3.0))
+    if available < float(live.get("min_stake_gbp", 1.0)):
+        logger.error(
+            "LIVE MODE REFUSED: available balance £%.2f is below minimum stake",
+            available,
+        )
+        client.close()
+        return 2
+    if exposure >= total_cap:
+        logger.error(
+            "LIVE MODE REFUSED: account exposure £%.2f meets/exceeds £%.2f cap",
+            exposure, total_cap,
+        )
+        client.close()
+        return 2
+
+    interval = live_scan_interval(config)
+    logger.warning(
+        "LIVE MODE ARMED: balance £%.2f, exposure £%.2f, strategy bankroll £%.2f, "
+        "single liability cap £%.2f, total exposure cap £%.2f, interval %ss",
+        available, exposure, bankroll,
+        float(live.get("max_liability_per_bet_gbp", 2.0)),
+        total_cap,
+        interval,
+    )
+    cycle = 0
+    try:
+        while True:
+            cycle += 1
+            logger.warning("=== LIVE cycle #%s ===", cycle)
+            try:
+                trader.run_cycle()
+            except Exception as exc:
+                logger.error("LIVE cycle error: %s", exc, exc_info=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        logger.info("LIVE shutdown requested")
+    finally:
+        client.close()
+    return 0
 
 
 def deep_once(config):
@@ -255,17 +364,21 @@ def list_politics(config):
 def main():
     ap = argparse.ArgumentParser(description="Betfair paper trader")
     ap.add_argument("--config", default="config/config.yaml")
-    ap.add_argument("--scan-once", action="store_true")
-    ap.add_argument("--assess-once", action="store_true")
-    ap.add_argument("--deep-once", action="store_true")
-    ap.add_argument("--list-politics", action="store_true")
-    ap.add_argument("--paper", action="store_true")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--scan-once", action="store_true")
+    mode.add_argument("--assess-once", action="store_true")
+    mode.add_argument("--deep-once", action="store_true")
+    mode.add_argument("--list-politics", action="store_true")
+    mode.add_argument("--paper", action="store_true")
+    mode.add_argument("--live", action="store_true")
     args = ap.parse_args()
 
     config = load_config(args.config)
     setup_logging(config)
 
-    if args.scan_once:
+    if args.live:
+        raise SystemExit(run_live(config))
+    elif args.scan_once:
         scan_once(config)
     elif args.assess_once:
         assess_once(config)

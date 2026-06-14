@@ -168,10 +168,12 @@ open-position count. Check its modification time to confirm the bot is alive.
 
 ## Current Build Stage
 
-This repo is in dry-run/paper-trading hardening. Live trading should wait until:
+This repo is primarily in paper-trading hardening. The Betfair path now has a
+separately gated small-bankroll live executor, but its end-to-end order path
+cannot be validated with the free delayed application key.
 
-- CLOB V2 order placement has been tested with a small funded wallet
-- Stop-loss/exit sell paths and actual fills are reconciled against Polymarket in a live paper run
+- Betfair live application access has been activated and a minimum-stake order
+  has been verified
 - Probability assessments have enough fresh news/context for the target market categories
 - The test suite passes locally and on CI
 
@@ -216,6 +218,30 @@ no paid fallback.
 Every paper bet stores `assessment_provider` and `assessment_model`; run
 `python -m core.paper_analysis` to compare calibration and ROI by provider
 before deciding whether the cheaper route is good enough for live capital.
+
+### Betfair live execution
+
+Real-money Betfair execution is available only through the explicit `--live`
+mode. Paper mode remains the default. Live mode refuses to start unless:
+
+- `live.enabled: true`
+- `betfair.app_key_mode: live`
+- `BETFAIR_LIVE_ACK=I_ACCEPT_REAL_MONEY_RISK`
+- Betfair's `getDeveloperAppKeys` confirms the configured key is active and
+  non-delayed
+- account balance and existing exposure pass the configured limits
+
+The default £10 experiment allows one order per cycle, two per UTC day, £2
+maximum liability per bet, £3 aggregate exposure, and a £5 cumulative loss
+stop. It initially trades only the paper run's candidate slice: LAY signals,
+8-12% assessed edge, and 50-75% confidence. All orders are synchronous
+`FILL_OR_KILL` LIMIT orders, so unmatched orders never remain in the market.
+Every attempt is appended to `data/live_order_attempts.jsonl`; accepted orders
+are stored separately in `data/live_bets.jsonl`.
+
+Betfair currently distinguishes free delayed development access from activated
+live betting access. The developer site lists a £499 activation fee for live
+Exchange API use. Depositing £10 does not remove that API requirement.
 
 ## License
 

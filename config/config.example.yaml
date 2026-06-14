@@ -165,10 +165,42 @@ betfair:
   # Use the DELAYED key (version 1.0-Delay) for validation. Live key needs the
   # £499 activation and is only worth it once paper results prove out.
   app_key: "YOUR_BETFAIR_DELAYED_APP_KEY"
+  app_key_mode: "delayed"  # change to "live" only after activating a live key
   username: "YOUR_BETFAIR_USERNAME"
   password: "YOUR_BETFAIR_PASSWORD"
   locale: "en"
   currency: "GBP"
+
+# Real-money execution. This remains inert unless --live, enabled=true,
+# app_key_mode=live, and BETFAIR_LIVE_ACK=I_ACCEPT_REAL_MONEY_RISK are all set.
+live:
+  enabled: false
+  acknowledgement_env: "BETFAIR_LIVE_ACK"
+  store_path: "data/live_bets.jsonl"
+  audit_path: "data/live_order_attempts.jsonl"
+  governor_state_path: "data/live_governor.json"
+  health_path: "data/live_health.json"
+  bankroll_gbp: 10.0
+  min_stake_gbp: 1.0
+  # At a £10 bankroll, fractional Kelly often falls below Betfair's £1 minimum.
+  # False uses confidence-scaled sizing while retaining the hard liability caps.
+  use_kelly_sizing: false
+  max_liability_per_bet_gbp: 2.0
+  max_total_liability_gbp: 3.0
+  max_loss_gbp: 5.0
+  max_open_bets: 2
+  max_open_bets_per_market: 1
+  max_bets_per_cycle: 1
+  daily_order_limit: 2
+  scan_interval: 900
+  # Initial experimental slice from paper results. Revisit only with more data.
+  allowed_sides:
+    - "LAY"
+  min_edge: 0.08
+  max_edge: 0.12
+  min_confidence: 0.50
+  max_confidence: 0.75
+  strategy_ref: "oracle-live"
 
 # Betfair scanner scope (overrides the Polymarket scanner block above when
 # running the Betfair path). All sports + politics, pre-event by default.
