@@ -78,6 +78,11 @@ def provider_ts():
     })
 
 
+def test_configured_providers_follow_routing_order():
+    assert provider_ts().configured_providers() == ["gemini", "anthropic"]
+    assert ts().configured_providers() == ["anthropic"]
+
+
 def market():
     return BetfairMarket(
         market_id="1.2",

@@ -202,6 +202,31 @@ live:
   max_confidence: 0.75
   strategy_ref: "oracle-live"
 
+# Read-only tickets for manual placement. This uses the delayed key, never
+# calls placeOrders, and rechecks the latest available book before printing.
+recommendations:
+  output_path: "data/manual_recommendations_latest.json"
+  signal_store_path: "data/recommendation_signals.jsonl"
+  governor_state_path: "data/recommendation_governor.json"
+  bankroll_gbp: 10.0
+  min_stake_gbp: 1.0
+  use_kelly_sizing: false
+  max_liability_per_bet_gbp: 2.0
+  max_total_liability_gbp: 3.0
+  max_recommendations: 2
+  max_markets_to_assess: 8
+  min_hours_ahead: 0.5
+  max_hours_ahead: 24.0
+  valid_for_minutes: 10
+  allowed_sides:
+    - "LAY"
+  min_edge: 0.08
+  max_edge: 0.12
+  min_confidence: 0.50
+  max_confidence: 0.75
+  daily_deep_assessment_budget: 8
+  daily_paid_deep_assessment_budget: 2
+
 # Betfair scanner scope (overrides the Polymarket scanner block above when
 # running the Betfair path). All sports + politics, pre-event by default.
 betfair_scanner:

@@ -305,3 +305,33 @@ class PaperBet(BaseModel):
         if conf < 0.75:
             return "med"
         return "high"
+
+
+class ManualRecommendation(BaseModel):
+    """A read-only betting ticket for manual review and placement."""
+    recommendation_id: str
+    generated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    valid_until: datetime
+    market_id: str
+    event_name: str
+    market_name: str
+    competition: str = ""
+    start_time: Optional[datetime] = None
+    selection_id: int
+    runner_name: str
+    side: BetSide
+    quoted_odds: float
+    price_rule: str
+    stake: float
+    liability: float
+    estimated_probability: float
+    market_fair_prob: float
+    edge: float
+    confidence: float
+    reasoning: str = ""
+    sleeve: str = "general"
+    assessment_provider: str = ""
+    assessment_model: str = ""
+    price_data_mode: str = "delayed"

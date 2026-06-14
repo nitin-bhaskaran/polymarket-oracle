@@ -213,6 +213,14 @@ class TwoStageAssessor:
             return self._configured_key(self.anthropic_api_key)
         return False
 
+    def configured_providers(self) -> list[str]:
+        """Providers in routing order that currently have usable credentials."""
+        return [
+            str(provider).lower()
+            for provider in self.provider_order
+            if self._provider_available(str(provider).lower())
+        ]
+
     def _gemini_call(
         self, *, model: str, system: str, prompt: str, max_tokens: int,
         grounded: bool,

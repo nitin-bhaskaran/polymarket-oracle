@@ -126,8 +126,15 @@ bets** — below that, treat every number as noise. Watch for:
 python -m core.betfair_main --scan-once      # list markets, no assessment
 python -m core.betfair_main --assess-once    # triage only (no web search)
 python -m core.betfair_main --deep-once      # one full deep web-search assess
+python -m core.betfair_main --recommend-once # read-only manual bet tickets
 python -m core.betfair_main --list-politics  # list political markets
 ```
+
+`--recommend-once` never calls `placeOrders` and does not need a live key. It
+writes the latest result to `data/manual_recommendations_latest.json`. Tickets
+expire after ten minutes. Because the development key is delayed, compare the
+ticket with the current Betfair screen and place only when its price rule still
+holds. `NO MANUAL BET RECOMMENDED` is a valid outcome.
 
 ---
 

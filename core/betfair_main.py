@@ -5,6 +5,7 @@ Modes:
   --scan-once : log in, scan markets once, print what was found, exit (smoke test).
   --assess-once : scan + assess one cycle's markets, print edges, place no bets.
   --paper     : run the paper-trading loop continuously (default).
+  --recommend-once : print read-only, manually placeable recommendations.
   --live      : run gated real-money execution (requires all arming controls).
 
 Reads config/config.yaml plus .env overrides for secrets. Paper mode is the
@@ -28,6 +29,10 @@ try:
 except ImportError:
     load_dotenv = None
 
+from core.tls import configure_system_trust
+
+configure_system_trust()
+
 from core.betfair_client import BetfairClient
 from core.betfair_scanner import BetfairScanner
 from core.betfair_assessor import BetfairAssessor
@@ -39,6 +44,7 @@ from core.betfair_live import (
     verify_live_app_key,
 )
 from core.paper_store import PaperBetStore
+from core.betfair_recommend import BetfairRecommendationEngine
 
 logger = logging.getLogger("betfair.main")
 
@@ -173,6 +179,79 @@ def run_paper(config):
         logger.info("Shutdown requested")
     finally:
         client.close()
+
+
+def build_recommendations(config):
+    recommendation_config = copy.deepcopy(config)
+    rc = recommendation_config.get("recommendations", {})
+    scanner_config = recommendation_config.setdefault("scanner", {})
+    scanner_config["in_play_enabled"] = False
+    scanner_config["min_hours_ahead"] = float(
+        rc.get("min_hours_ahead", 0.5)
+    )
+    scanner_config["max_resolution_days"] = (
+        float(rc.get("max_hours_ahead", 24.0)) / 24.0
+    )
+    scanner_config["max_markets_per_scan"] = int(
+        rc.get("max_markets_to_assess", 8)
+    )
+
+    paper_config = recommendation_config.setdefault("paper", {})
+    paper_config["governor_state_path"] = rc.get(
+        "governor_state_path", "data/recommendation_governor.json"
+    )
+    paper_config["reassess_after_hours"] = 0
+    paper_config["daily_deep_assessment_budget"] = int(
+        rc.get("daily_deep_assessment_budget", 8)
+    )
+    paper_config["daily_paid_deep_assessment_budget"] = int(
+        rc.get("daily_paid_deep_assessment_budget", 2)
+    )
+
+    client = BetfairClient(recommendation_config)
+    scanner = BetfairScanner(recommendation_config, client=client)
+    assessor = BetfairAssessor(recommendation_config)
+    two_stage = TwoStageAssessor(recommendation_config)
+    governor = AssessmentGovernor(recommendation_config)
+    signal_store = PaperBetStore(
+        rc.get("signal_store_path", "data/recommendation_signals.jsonl")
+    )
+    signal_trader = BetfairPaperTrader(
+        recommendation_config,
+        scanner,
+        assessor,
+        store=signal_store,
+        two_stage=two_stage,
+        governor=governor,
+    )
+    engine = BetfairRecommendationEngine(
+        recommendation_config, scanner, signal_trader
+    )
+    return client, engine
+
+
+def recommend_once(config):
+    client, engine = build_recommendations(config)
+    providers = engine.signal_trader.two_stage.configured_providers()
+    if not providers:
+        logger.error(
+            "Recommendation scan refused: no configured assessment provider. "
+            "Set GEMINI_API_KEY or ANTHROPIC_API_KEY."
+        )
+        client.close()
+        return 2
+    logger.info("Recommendation assessment providers: %s", ", ".join(providers))
+    if not client.login():
+        logger.error("Recommendation scan failed: Betfair login failed")
+        return 2
+    try:
+        engine.run_once()
+    except Exception as exc:
+        logger.error("Recommendation scan failed: %s", exc, exc_info=True)
+        return 2
+    finally:
+        client.close()
+    return 0
 
 
 def build_live(config):
@@ -370,6 +449,7 @@ def main():
     mode.add_argument("--deep-once", action="store_true")
     mode.add_argument("--list-politics", action="store_true")
     mode.add_argument("--paper", action="store_true")
+    mode.add_argument("--recommend-once", action="store_true")
     mode.add_argument("--live", action="store_true")
     args = ap.parse_args()
 
@@ -378,6 +458,8 @@ def main():
 
     if args.live:
         raise SystemExit(run_live(config))
+    elif args.recommend_once:
+        raise SystemExit(recommend_once(config))
     elif args.scan_once:
         scan_once(config)
     elif args.assess_once:

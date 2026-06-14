@@ -219,6 +219,24 @@ Every paper bet stores `assessment_provider` and `assessment_model`; run
 `python -m core.paper_analysis` to compare calibration and ROI by provider
 before deciding whether the cheaper route is good enough for live capital.
 
+### Manual recommendations
+
+`python -m core.betfair_main --recommend-once` runs the same two-stage,
+grounded assessment and safety filters without calling any betting endpoint.
+It considers up to eight liquid pre-event markets starting within 30 minutes
+to 24 hours, refreshes the book after research, and prints at most two manual
+tickets. Defaults mirror the current paper-derived candidate slice: LAY only,
+8-12% edge, 50-75% confidence, £2 maximum liability each, and £3 combined.
+
+Tickets expire after ten minutes and include an odds rule: a LAY should only
+be placed at the quoted odds or lower; a BACK only at the quote or higher.
+With the free application key, API prices are delayed, so the current Betfair
+screen must satisfy that rule before manual placement. An empty result means
+the system recommends no bet, not that the scan failed.
+
+On Windows the entry point uses the native certificate store through
+`truststore`, keeping TLS verification enabled for Betfair and model APIs.
+
 ### Betfair live execution
 
 Real-money Betfair execution is available only through the explicit `--live`

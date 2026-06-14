@@ -1,6 +1,7 @@
 # Polymarket APIs
 py-clob-client-v2>=1.0.1
 httpx>=0.27.0
+truststore>=0.10.4
 
 # AI / LLM
 anthropic>=0.42.0
