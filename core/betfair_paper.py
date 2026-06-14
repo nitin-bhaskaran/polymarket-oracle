@@ -28,6 +28,7 @@ from core.betfair_models import (
 from core.betfair_fills import (
     simulate_cross_fill, update_passive, expire_if_stale, settle,
 )
+from core.betfair_recommend import PaperRecommendationFeed
 from core.betfair_sizing import OddsSizingInputs, OddsSizingConfig, compute_bet_size
 from core.paper_store import PaperBetStore
 
@@ -107,6 +108,9 @@ class BetfairPaperTrader:
         )
         self.scale_in_size_multiplier = scale_in.get(
             "size_multiplier", 0.5
+        )
+        self.manual_recommendations = PaperRecommendationFeed(
+            config, scanner, self
         )
 
     # ── capital accounting (paper) ──
@@ -634,6 +638,7 @@ class BetfairPaperTrader:
             bet = simulate_cross_fill(bet, market)
 
         self.store.add(bet)
+        self.manual_recommendations.emit(market, assessment, bet)
         logger.info(
             f"PLACED paper {side.value} {assessment.runner_name} @ {bet.requested_odds} "
             f"(filled={bet.filled_odds if bet.status == PaperBetStatus.FILLED else 'no'}, "

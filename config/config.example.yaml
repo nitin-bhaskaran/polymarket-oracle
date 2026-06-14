@@ -267,6 +267,28 @@ paper:
     min_edge_improvement: 0.02
     size_multiplier: 0.50
 
+  # Publish fresh, read-only manual tickets whenever the paper loop places a
+  # qualifying pre-event bet. This never calls Betfair's order endpoint.
+  manual_recommendations:
+    enabled: true
+    pre_event_only: true
+    active_path: "data/manual_recommendations_active.json"
+    history_path: "data/manual_recommendations_history.jsonl"
+    bankroll_gbp: 10.0
+    min_stake_gbp: 1.0
+    use_kelly_sizing: false
+    max_liability_per_bet_gbp: 2.0
+    max_total_active_liability_gbp: 3.0
+    max_active_recommendations: 2
+    valid_for_minutes: 10
+    allowed_sides:
+      - "BACK"
+      - "LAY"
+    min_edge: 0.05
+    max_edge: 1.0
+    min_confidence: 0.0
+    max_confidence: 1.0
+
   # Broad discovery remains enabled. Matching markets are routed into a sleeve
   # with their own market-type and exposure rules; everything else is general.
   default_sleeve:

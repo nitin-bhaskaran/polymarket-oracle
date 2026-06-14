@@ -11,6 +11,7 @@ import json
 import logging
 import uuid
 from collections import Counter
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -319,3 +320,207 @@ class BetfairRecommendationEngine:
                 start,
                 ticket.valid_until.strftime("%H:%M:%S UTC"),
             )
+
+
+class PaperRecommendationFeed:
+    """Mirror qualifying paper bets into a read-only manual ticket feed."""
+
+    def __init__(self, config: dict, scanner, signal_trader):
+        feed_config = (
+            config.get("paper", {}).get("manual_recommendations", {})
+        )
+        self.enabled = bool(feed_config.get("enabled", False))
+        self.pre_event_only = bool(
+            feed_config.get("pre_event_only", True)
+        )
+        self.history_path = Path(
+            feed_config.get(
+                "history_path",
+                "data/manual_recommendations_history.jsonl",
+            )
+        )
+
+        merged = deepcopy(config)
+        recommendation_config = dict(config.get("recommendations", {}))
+        recommendation_config.update(feed_config)
+        recommendation_config["output_path"] = feed_config.get(
+            "active_path",
+            "data/manual_recommendations_active.json",
+        )
+        recommendation_config["max_recommendations"] = feed_config.get(
+            "max_active_recommendations",
+            recommendation_config.get("max_recommendations", 2),
+        )
+        recommendation_config["max_total_liability_gbp"] = feed_config.get(
+            "max_total_active_liability_gbp",
+            recommendation_config.get("max_total_liability_gbp", 3.0),
+        )
+        merged["recommendations"] = recommendation_config
+        self.engine = BetfairRecommendationEngine(
+            merged, scanner, signal_trader
+        )
+        self.active_path = self.engine.output_path
+        self.history_path.parent.mkdir(parents=True, exist_ok=True)
+        self.active = self._load_active() if self.enabled else []
+
+    def _load_active(self) -> list[ManualRecommendation]:
+        if not self.active_path.exists():
+            return []
+        try:
+            payload = json.loads(
+                self.active_path.read_text(encoding="utf-8")
+            )
+            return [
+                ManualRecommendation.model_validate(item)
+                for item in payload.get("recommendations", [])
+            ]
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning(
+                "Could not load the active manual recommendation feed: %s",
+                exc,
+            )
+            return []
+
+    def _prune(self, now: datetime) -> None:
+        self.active = [
+            ticket for ticket in self.active
+            if ticket.valid_until > now
+        ]
+
+    def _persist(self, now: datetime) -> None:
+        payload = {
+            "generated_at": now.isoformat(),
+            "price_data_mode": self.engine.price_data_mode,
+            "total_recommended_liability": round(
+                sum(ticket.liability for ticket in self.active), 2
+            ),
+            "recommendations": [
+                ticket.model_dump(mode="json") for ticket in self.active
+            ],
+        }
+        temporary = self.active_path.with_suffix(
+            self.active_path.suffix + ".tmp"
+        )
+        temporary.write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(self.active_path)
+
+    def emit(self, market, assessment, paper_bet):
+        """Create a fresh manual ticket without affecting paper placement."""
+        if not self.enabled:
+            return None
+        try:
+            return self._emit(market, assessment, paper_bet)
+        except Exception:
+            logger.exception(
+                "Manual recommendation feed failed for paper bet %s; "
+                "paper trading continues unchanged.",
+                paper_bet.bet_id,
+            )
+            return None
+
+    def _emit(self, market, assessment, paper_bet):
+        now = datetime.now(timezone.utc)
+        self._prune(now)
+        if (
+            self.pre_event_only
+            and (market.in_play or market.phase != MarketPhase.PRE_EVENT)
+        ):
+            self._persist(now)
+            logger.info(
+                "No manual ticket for paper bet %s: market is not pre-event",
+                paper_bet.bet_id,
+            )
+            return None
+
+        refreshed_assessment = assessment.model_copy(deep=True)
+        refreshed, rejection = self.engine._refresh_assessment(
+            market, refreshed_assessment
+        )
+        if not rejection:
+            rejection = self.engine._signal_rejection(refreshed_assessment)
+        if (
+            not rejection
+            and refreshed_assessment.recommended_side != paper_bet.side
+        ):
+            rejection = "fresh book changed the recommended side"
+        if rejection:
+            self._persist(now)
+            logger.info(
+                "No manual ticket for paper bet %s: %s",
+                paper_bet.bet_id,
+                rejection,
+            )
+            return None
+
+        key = (
+            paper_bet.market_id,
+            paper_bet.selection_id,
+            paper_bet.side,
+        )
+        self.active = [
+            ticket for ticket in self.active
+            if (ticket.market_id, ticket.selection_id, ticket.side) != key
+        ]
+        if len(self.active) >= self.engine.max_recommendations:
+            self._persist(now)
+            logger.info(
+                "No manual ticket for paper bet %s: active ticket limit %s",
+                paper_bet.bet_id,
+                self.engine.max_recommendations,
+            )
+            return None
+
+        used_liability = sum(ticket.liability for ticket in self.active)
+        sizing = self.engine._size(
+            refreshed_assessment,
+            self.engine.max_total_liability - used_liability,
+        )
+        if sizing["stake"] <= 0:
+            self._persist(now)
+            logger.info(
+                "No manual ticket for paper bet %s: sizing below minimum "
+                "or active liability budget exhausted",
+                paper_bet.bet_id,
+            )
+            return None
+
+        ticket = self.engine._ticket(
+            refreshed,
+            refreshed_assessment,
+            paper_bet.sleeve,
+            sizing,
+        )
+        ticket.source = "paper_loop"
+        ticket.paper_bet_id = paper_bet.bet_id
+        self.active.append(ticket)
+        self.active.sort(
+            key=lambda item: item.generated_at,
+            reverse=True,
+        )
+        self._persist(now)
+        with self.history_path.open("a", encoding="utf-8") as history:
+            history.write(
+                json.dumps(ticket.model_dump(mode="json")) + "\n"
+            )
+
+        logger.warning(
+            "MANUAL TICKET FROM PAPER: %s %s | %s / %s | %s | "
+            "stake GBP %.2f, max liability GBP %.2f | expires %s",
+            ticket.side.value,
+            ticket.runner_name,
+            ticket.event_name,
+            ticket.market_name,
+            ticket.price_rule,
+            ticket.stake,
+            ticket.liability,
+            ticket.valid_until.strftime("%H:%M:%S UTC"),
+        )
+        if self.engine.price_data_mode != "live":
+            logger.warning(
+                "Manual ticket uses delayed API prices. Recheck the Betfair "
+                "screen and obey its price rule before choosing to place it."
+            )
+        return ticket

@@ -234,6 +234,13 @@ With the free application key, API prices are delayed, so the current Betfair
 screen must satisfy that rule before manual placement. An empty result means
 the system recommends no bet, not that the scan failed.
 
+The continuous `--paper` loop also mirrors each qualifying pre-event paper bet
+into `data/manual_recommendations_active.json`. These tickets are refreshed
+against the latest API book, expire after ten minutes, and are sized separately
+for a GBP 10 manual bankroll. The rolling history is stored in
+`data/manual_recommendations_history.jsonl`. This feed remains read-only:
+whether to place a ticket manually is entirely the operator's decision.
+
 On Windows the entry point uses the native certificate store through
 `truststore`, keeping TLS verification enabled for Betfair and model APIs.
 

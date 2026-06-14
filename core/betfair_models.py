@@ -310,6 +310,8 @@ class PaperBet(BaseModel):
 class ManualRecommendation(BaseModel):
     """A read-only betting ticket for manual review and placement."""
     recommendation_id: str
+    source: str = "on_demand"
+    paper_bet_id: str = ""
     generated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )

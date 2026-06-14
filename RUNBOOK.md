@@ -87,6 +87,18 @@ What a healthy run looks like:
 State persists to `data/paper_bets.jsonl` and `data/governor.json`, so the run
 survives restarts. **The daily budget does NOT reset on restart** (deliberate).
 
+When a qualifying pre-event paper bet is placed, the same loop writes a
+separately sized manual ticket to:
+
+```powershell
+Get-Content data\manual_recommendations_active.json
+```
+
+Tickets expire after ten minutes and the file contains only the current active
+shortlist. `data/manual_recommendations_history.jsonl` retains emitted tickets.
+No real order is sent. With a delayed key, check the live Betfair screen and
+obey the ticket's price rule before deciding whether to place anything.
+
 ---
 
 ## 4. Stop the run

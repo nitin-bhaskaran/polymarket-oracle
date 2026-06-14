@@ -1,5 +1,6 @@
 """Tests for the paper-bet store and paper-trading orchestrator."""
 
+import json
 import os
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -121,6 +122,87 @@ def test_cycle_places_and_fills_preevent_back():
     assert bet.status == PaperBetStatus.FILLED
     assert bet.assessment_provider == "gemini"
     assert bet.assessment_model == "gemini-2.5-flash"
+
+
+def test_paper_bet_emits_separately_sized_manual_ticket():
+    s = _store()
+    directory = s.path.parent
+    paper = {
+        "manual_recommendations": {
+            "enabled": True,
+            "active_path": str(directory / "manual_active.json"),
+            "history_path": str(directory / "manual_history.jsonl"),
+            "bankroll_gbp": 10.0,
+            "min_stake_gbp": 1.0,
+            "use_kelly_sizing": False,
+            "max_liability_per_bet_gbp": 2.0,
+            "max_total_active_liability_gbp": 3.0,
+            "max_active_recommendations": 2,
+            "allowed_sides": ["BACK", "LAY"],
+            "min_edge": 0.05,
+            "max_edge": 1.0,
+            "min_confidence": 0.0,
+            "max_confidence": 1.0,
+        },
+    }
+    trader = _trader(_Scanner(_market()), _Assessor(0.60), s, paper)
+
+    assert trader.run_cycle() == 1
+
+    payload = json.loads(
+        (directory / "manual_active.json").read_text(encoding="utf-8")
+    )
+    assert len(payload["recommendations"]) == 1
+    ticket = payload["recommendations"][0]
+    assert ticket["source"] == "paper_loop"
+    assert ticket["paper_bet_id"] == s.all()[0].bet_id
+    assert ticket["side"] == "BACK"
+    assert ticket["stake"] <= 2.0
+    assert ticket["liability"] <= 2.0
+    assert (directory / "manual_history.jsonl").exists()
+
+
+def test_fresh_book_can_reject_manual_ticket_without_losing_paper_bet():
+    class MovingScanner(_Scanner):
+        def refresh_book(self, mid):
+            refreshed = _market()
+            refreshed.runners[0].available_to_back = [
+                PriceLevel(price=1.48, size=500)
+            ]
+            refreshed.runners[0].available_to_lay = [
+                PriceLevel(price=1.50, size=500)
+            ]
+            refreshed.runners[1].available_to_back = [
+                PriceLevel(price=2.98, size=500)
+            ]
+            refreshed.runners[1].available_to_lay = [
+                PriceLevel(price=3.00, size=500)
+            ]
+            return refreshed
+
+    s = _store()
+    directory = s.path.parent
+    paper = {
+        "manual_recommendations": {
+            "enabled": True,
+            "active_path": str(directory / "manual_active.json"),
+            "history_path": str(directory / "manual_history.jsonl"),
+            "allowed_sides": ["BACK", "LAY"],
+            "min_edge": 0.05,
+            "max_edge": 1.0,
+            "min_confidence": 0.0,
+            "max_confidence": 1.0,
+        },
+    }
+    trader = _trader(MovingScanner(_market()), _Assessor(0.60), s, paper)
+
+    assert trader.run_cycle() == 1
+    assert len(s.all()) == 1
+    payload = json.loads(
+        (directory / "manual_active.json").read_text(encoding="utf-8")
+    )
+    assert payload["recommendations"] == []
+    assert not (directory / "manual_history.jsonl").exists()
 
 
 def test_cycle_no_bet_when_edge_below_threshold():
